@@ -39,6 +39,7 @@ Download the latest release from the [Releases](../../releases) page:
 3. Run `EfficientAssetRipper.exe`
 
 **Requirements for the pre-built release:**
+
 - Windows 10/11 (x64)
 - [.NET 8.0 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (for CUE4ParseCLI)
 - [Blender 4.0+](https://www.blender.org/download/) (for asset processing)
@@ -50,22 +51,24 @@ Download the latest release from the [Releases](../../releases) page:
 
 ### Prerequisites
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| [Python](https://python.org) | 3.10+ | Application runtime |
-| [Blender](https://www.blender.org/download/) | 4.0+ | Headless mesh import & material wiring |
-| [Everything](https://www.voidtools.com/) | 1.4+ | Fast file search (must be running) |
-| [.NET SDK](https://dotnet.microsoft.com/download/dotnet/8.0) | 8.0+ | Build CUE4ParseCLI (optional — pre-built included in releases) |
+| Tool                                                         | Version | Purpose                                                        |
+| ------------------------------------------------------------ | ------- | -------------------------------------------------------------- |
+| [Python](https://python.org)                                 | 3.10+   | Application runtime                                            |
+| [Blender](https://www.blender.org/download/)                 | 4.0+    | Headless mesh import & material wiring                         |
+| [Everything](https://www.voidtools.com/)                     | 1.4+    | Fast file search (must be running)                             |
+| [.NET SDK](https://dotnet.microsoft.com/download/dotnet/8.0) | 8.0+    | Build CUE4ParseCLI (optional — pre-built included in releases) |
 
 ### Steps
 
 1. **Clone the repository**
+
    ```bash
    git clone https://github.com/YOUR_USERNAME/EfficientAssetRipper.git
    cd EfficientAssetRipper
    ```
 
 2. **Create a virtual environment**
+
    ```bash
    python -m venv venv
    ```
@@ -73,15 +76,19 @@ Download the latest release from the [Releases](../../releases) page:
 3. **Activate the virtual environment**
 
    Windows:
+
    ```powershell
    .\venv\Scripts\Activate.ps1
    ```
+
    Linux/macOS:
+
    ```bash
    source venv/bin/activate
    ```
 
 4. **Install dependencies**
+
    ```bash
    pip install -r requirements.txt
    ```
@@ -89,10 +96,13 @@ Download the latest release from the [Releases](../../releases) page:
 5. **Build CUE4ParseCLI** (optional — only needed for the VFS unpacker)
 
    Windows:
+
    ```bash
    build_cli.bat
    ```
+
    Linux/macOS:
+
    ```bash
    ./build_cli.sh
    ```
@@ -134,6 +144,7 @@ build.bat
 ```
 
 This will:
+
 1. Install PyInstaller if needed
 2. Build the Python application into a standalone exe
 3. Copy data files (blender scripts, texture presets, fonts)
@@ -229,15 +240,15 @@ EfficientAssetRipper/
 
 EfficientAssetRipper uses a preset system to wire textures to Blender shader nodes. The default preset (`default_pbr`) handles standard PBR materials:
 
-| Texture Slot | Suffixes | Wiring Type |
-|-------------|----------|-------------|
-| Base Color | `_C`, `_D`, `_Albedo`, `_CS` | Direct → Base Color |
-| Normal | `_N`, `_Normal` | Normal Map node → Normal |
-| ORM | `_ORM` | Split channels: R→AO, G→Roughness, B→Metallic |
-| Emissive | `_E`, `_Emissive` | Direct → Emission Color |
-| Opacity/Mask | `_M`, `_Mask`, `_A` | Direct → Alpha |
-| Roughness | `_R`, `_Roughness` | Direct → Roughness |
-| Metallic | `_MT`, `_Metallic` | Direct → Metallic |
+| Texture Slot | Suffixes                     | Wiring Type                                   |
+| ------------ | ---------------------------- | --------------------------------------------- |
+| Base Color   | `_C`, `_D`, `_Albedo`, `_CS` | Direct → Base Color                           |
+| Normal       | `_N`, `_Normal`              | Normal Map node → Normal                      |
+| ORM          | `_ORM`                       | Split channels: R→AO, G→Roughness, B→Metallic |
+| Emissive     | `_E`, `_Emissive`            | Direct → Emission Color                       |
+| Opacity/Mask | `_M`, `_Mask`, `_A`          | Direct → Alpha                                |
+| Roughness    | `_R`, `_Roughness`           | Direct → Roughness                            |
+| Metallic     | `_MT`, `_Metallic`           | Direct → Metallic                             |
 
 Custom presets and per-material overrides can be defined in [data/texture_presets.json](data/texture_presets.json).
 
@@ -263,25 +274,27 @@ Settings are stored in the Windows registry via QSettings (`HKCU\Software\Effici
 
 Key settings:
 
-| Setting | Description |
-|---------|-------------|
-| `game_folder` | Path to game content directory |
-| `blender_exe` | Path to Blender executable |
-| `everything_dll` | Path to Everything64.dll |
-| `output_dir` | Default output directory for .blend files |
-| `cue4parse_cli` | Path to CUE4ParseCLI.exe |
-| `timeout_seconds` | Blender processing timeout (default: 120s) |
-| `color_scheme` | UI theme (Dusk, Bloom, Slate, Midnight, or custom) |
+| Setting           | Description                                        |
+| ----------------- | -------------------------------------------------- |
+| `game_folder`     | Path to game content directory                     |
+| `blender_exe`     | Path to Blender executable                         |
+| `everything_dll`  | Path to Everything64.dll                           |
+| `output_dir`      | Default output directory for .blend files          |
+| `cue4parse_cli`   | Path to CUE4ParseCLI.exe                           |
+| `timeout_seconds` | Blender processing timeout (default: 120s)         |
+| `color_scheme`    | UI theme (Dusk, Bloom, Slate, Midnight, or custom) |
 
 ---
 
 ## Dependencies
 
 ### Python
+
 - [PySide6](https://pypi.org/project/PySide6/) ≥ 6.6.0 — Qt6 GUI framework
 - [Pillow](https://pypi.org/project/Pillow/) ≥ 10.0.0 — Image loading (TGA/PNG/DDS preview)
 
 ### External Tools
+
 - [Blender](https://www.blender.org/) 4.0+ — Headless PSK import and shader node construction
 - [Everything](https://www.voidtools.com/) — Windows file search (must be running)
 - [.NET 8.0 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) — Required for CUE4ParseCLI
