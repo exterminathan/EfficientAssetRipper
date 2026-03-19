@@ -1,0 +1,30 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── .NET build artifacts ──────────────────────────────────────────────────────
+cue4parse_cli/obj/
+cue4parse_cli/bin/
+
+# ── User data (machine-specific paths, optional AES keys) ────────────────────
+# Sync these with:  .\sync.ps1 -Backup / -Restore
+profiles/
+cache/
+
+# ── Generated output ──────────────────────────────────────────────────────────
+outputs/
+logs/
+
+# ── OS noise ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user

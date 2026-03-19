@@ -1,0 +1,906 @@
+"""Main application window — ties together all panels."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMenuBar,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QSplitter,
+    QStatusBar,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+import config
+from core.asset_scanner import (
+    AssetEntry,
+    AssetScanner,
+    load_scan_cache,
+    save_scan_cache,
+)
+from core.everything import EverythingError, get_sdk, reset_sdk
+from core.job_manager import JobManager
+from core.profile_manager import ProfileManager
+from gui.asset_browser import AssetBrowser
+from gui.blend_combiner import BlendCombinerPanel
+from gui.tga_previewer import TGAPreviewerPanel
+from gui.audio_previewer import AudioPreviewerPanel
+from gui.log_viewer import LogViewer
+from gui.profile_bar import ProfileBar
+from gui.psk_picker import PskPickerPanel
+from gui.queue_panel import QueuePanel
+from gui.text_viewer import TextViewer
+from gui.unpacker_panel import UnpackerPanel
+from gui.settings_panel import SettingsDialog
+import gui.theme as theme
+
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Scanner worker (runs in background thread)
+# ---------------------------------------------------------------------------
+
+class ScanWorker(QThread):
+    """Background thread for asset scanning."""
+
+    progress = Signal(int, int, str)
+    finished = Signal(list)         # list[AssetEntry]
+    error = Signal(str)
+
+    def __init__(self, scanner: AssetScanner, parent=None):
+        super().__init__(parent)
+        self._scanner = scanner
+
+    def cancel(self):
+        self._scanner.cancel()
+
+    def run(self):
+        try:
+            results = self._scanner.scan(
+                progress_callback=lambda cur, tot, msg: self.progress.emit(cur, tot, msg)
+            )
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class RescanWorker(QThread):
+    """Background thread for re-resolving individual assets."""
+
+    progress = Signal(int, int, str)
+    finished = Signal(int, int)     # (resolved_count, still_incomplete)
+    error = Signal(str)
+
+    def __init__(self, scanner: AssetScanner, entries: list, parent=None):
+        super().__init__(parent)
+        self._scanner = scanner
+        self._entries = entries
+
+    def run(self):
+        try:
+            total = len(self._entries)
+            resolved = 0
+            for idx, entry in enumerate(self._entries):
+                self.progress.emit(idx, total, f"Re-scanning: {entry.name}")
+                self._scanner.resolve_entry(entry)
+                if entry.status == "ready":
+                    resolved += 1
+            self.progress.emit(total, total, "Re-scan complete")
+            still_incomplete = total - resolved
+            self.finished.emit(resolved, still_incomplete)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _PickerResolveWorker(QThread):
+    """Background thread for resolving PSK entries from the picker."""
+
+    progress = Signal(int, int, str)
+    finished = Signal(int, int)     # (resolved_count, still_incomplete)
+    error = Signal(str)
+
+    def __init__(self, scanner: AssetScanner, entries: list, parent=None):
+        super().__init__(parent)
+        self._scanner = scanner
+        self._entries = entries
+
+    def run(self):
+        try:
+            total = len(self._entries)
+            resolved = 0
+            for idx, entry in enumerate(self._entries):
+                self.progress.emit(idx, total, f"Resolving: {entry.name}")
+                self._scanner.resolve_entry(entry)
+                if entry.status == "ready":
+                    resolved += 1
+            self.progress.emit(total, total, "Resolve complete")
+            still_incomplete = total - resolved
+            self.finished.emit(resolved, still_incomplete)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("EfficientAssetRipper")
+        self.setMinimumSize(1200, 700)
+
+        self._job_manager: JobManager | None = None
+        self._scan_worker: ScanWorker | None = None
+        self._scan_worker_running = False
+        self._current_profile_name = ""
+
+        # Profile manager
+        self._profile_manager = ProfileManager()
+        self._profile_manager.migrate_from_qsettings(config)
+
+        self._build_ui()
+        self._build_menu()
+        self._load_initial_profile()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ── Profile bar (top) ─────────────────────────────────────────
+        self._profile_bar = ProfileBar(
+            self._profile_manager,
+            busy_check=self._is_busy,
+            cancel_fn=self._cancel_active_ops,
+            parent=self,
+        )
+        self._profile_bar.profile_switch_requested.connect(self._switch_profile)
+        self._profile_bar.profile_created.connect(self._on_profile_created)
+        self._profile_bar.profile_deleted.connect(self._on_profile_deleted)
+        self._profile_bar.profile_renamed.connect(self._on_profile_renamed)
+        main_layout.addWidget(self._profile_bar)
+
+        # ── Main content area ─────────────────────────────────────────
+        content = QWidget()
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Left panel: tabs for asset browser and PSK picker
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        scan_bar = QHBoxLayout()
+        self._scan_btn = QPushButton("Scan Game Folder")
+        self._scan_btn.clicked.connect(self._start_scan)
+        scan_bar.addWidget(self._scan_btn)
+
+        self._cancel_scan_btn = QPushButton("Cancel Scan")
+        self._cancel_scan_btn.setEnabled(False)
+        self._cancel_scan_btn.clicked.connect(self._cancel_scan)
+        scan_bar.addWidget(self._cancel_scan_btn)
+
+        scan_bar.addStretch()
+        left_layout.addLayout(scan_bar)
+
+        self._left_tabs = QTabWidget()
+
+        self._browser = AssetBrowser()
+        self._left_tabs.addTab(self._browser, "Asset Browser")
+
+        self._psk_picker = PskPickerPanel()
+        self._left_tabs.addTab(self._psk_picker, "PSK Picker")
+
+        self._unpacker_panel = UnpackerPanel()
+        self._left_tabs.addTab(self._unpacker_panel, "Unpacker")
+
+        left_layout.addWidget(self._left_tabs)
+
+        # Right panel: tabs (queue/log vs combiner)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._right_tabs = QTabWidget()
+
+        # Tab 1: Queue + Log
+        queue_log_widget = QWidget()
+        ql_layout = QVBoxLayout(queue_log_widget)
+        ql_layout.setContentsMargins(0, 0, 0, 0)
+
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        self._queue = QueuePanel()
+        right_splitter.addWidget(self._queue)
+
+        self._log = LogViewer()
+        right_splitter.addWidget(self._log)
+
+        right_splitter.setSizes([300, 200])
+        ql_layout.addWidget(right_splitter)
+
+        self._right_tabs.addTab(queue_log_widget, "Queue / Log")
+
+        # Tab 2: Blend Combiner
+        self._combiner = BlendCombinerPanel()
+        self._combiner.log_message.connect(self._log.append)
+        self._right_tabs.addTab(self._combiner, "Blend Combiner")
+
+        # Tab 3: TGA Previewer
+        self._tga_previewer = TGAPreviewerPanel()
+        self._right_tabs.addTab(self._tga_previewer, "TGA Previewer")
+
+        # Tab 4: Text Viewer
+        self._text_viewer = TextViewer()
+        self._right_tabs.addTab(self._text_viewer, "Text Viewer")
+
+        # Tab 5: Audio Preview
+        self._audio_previewer = AudioPreviewerPanel()
+        self._right_tabs.addTab(self._audio_previewer, "Audio Preview")
+
+        right_layout.addWidget(self._right_tabs)
+
+        # Main horizontal splitter
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setSizes([600, 600])
+        content_layout.addWidget(splitter)
+
+        main_layout.addWidget(content, stretch=1)
+
+        # Status bar
+        self._statusbar = QStatusBar()
+        self.setStatusBar(self._statusbar)
+        self._statusbar.showMessage("Ready — configure settings and scan to begin")
+
+        # Connect signals
+        self._queue.process_requested.connect(self._process_queue)
+        self._queue.cancel_requested.connect(self._cancel_processing)
+        self._queue.reprocess_requested.connect(self._reprocess_asset)
+        self._browser.rescan_requested.connect(self._rescan_selected)
+        self._browser.add_to_queue_requested.connect(self._add_browser_to_queue)
+        self._browser.reprocess_requested.connect(self._reprocess_asset)
+        self._browser.delete_requested.connect(self._on_browser_delete)
+        self._psk_picker.add_to_queue_requested.connect(self._add_picker_to_queue)
+        self._unpacker_panel.psk_extracted.connect(self._on_psks_extracted)
+        self._unpacker_panel.log_message.connect(self._log.append)
+        self._unpacker_panel.props_viewed.connect(self._show_in_text_viewer)
+        self._unpacker_panel.audio_preview.connect(self._on_audio_preview)
+        self._unpacker_panel.tga_preview.connect(self._on_tga_preview)
+
+        # Give unpacker panel access to the audio previewer's temp directory
+        self._unpacker_panel._audio_preview_temp_dir = self._audio_previewer.temp_dir
+
+    def _show_in_text_viewer(self, title: str, text: str):
+        """Display text content in the Text Viewer tab and switch to it."""
+        self._text_viewer.show_text(title, text)
+        self._right_tabs.setCurrentWidget(self._text_viewer)
+
+    def _on_audio_preview(self, path: str):
+        """Load audio file in the Audio Preview tab and switch to it."""
+        self._audio_previewer.load_file(path)
+        self._right_tabs.setCurrentWidget(self._audio_previewer)
+
+    def _on_tga_preview(self, path: str):
+        """Load image file in the TGA Previewer tab and switch to it."""
+        self._tga_previewer.load_file(path)
+        self._right_tabs.setCurrentWidget(self._tga_previewer)
+
+    def _build_menu(self):
+        menubar = self.menuBar()
+
+        file_menu = menubar.addMenu("File")
+        file_menu.addAction("Settings...", self._open_settings)
+        file_menu.addSeparator()
+        file_menu.addAction("Exit", self.close)
+
+        tools_menu = menubar.addMenu("Tools")
+        tools_menu.addAction(
+            "Blend Combiner",
+            lambda: self._right_tabs.setCurrentWidget(self._combiner),
+        )
+
+        # ── Window menu — toggle visibility of each tab ───────────────
+        window_menu = menubar.addMenu("Window")
+        self._tab_actions = {}
+        for tabs, names in [
+            (self._left_tabs, ["Asset Browser", "PSK Picker", "Unpacker"]),
+            (self._right_tabs, ["Queue / Log", "Blend Combiner", "TGA Previewer", "Text Viewer", "Audio Preview"]),
+        ]:
+            for i, name in enumerate(names):
+                action = window_menu.addAction(name)
+                action.setCheckable(True)
+                action.setChecked(True)
+                widget = tabs.widget(i)
+                action.triggered.connect(
+                    lambda checked, t=tabs, w=widget, n=name: self._toggle_tab(t, w, n, checked)
+                )
+                self._tab_actions[(id(tabs), name)] = (action, tabs, widget, i)
+
+    def _toggle_tab(self, tab_widget: QTabWidget, widget: QWidget, name: str, visible: bool):
+        """Show or hide a tab in a QTabWidget."""
+        idx = tab_widget.indexOf(widget)
+        if visible and idx == -1:
+            # Re-insert at the original position
+            _, _, _, orig_idx = self._tab_actions[(id(tab_widget), name)]
+            insert_at = min(orig_idx, tab_widget.count())
+            tab_widget.insertTab(insert_at, widget, name)
+        elif not visible and idx != -1:
+            tab_widget.removeTab(idx)
+
+    # ------------------------------------------------------------------
+    # Settings
+    # ------------------------------------------------------------------
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.settings_changed.connect(self._on_settings_changed)
+        dlg.exec()
+
+    def _on_settings_changed(self):
+        reset_sdk()
+        self._log.append("Settings updated", "info")
+
+    # ------------------------------------------------------------------
+    # Scanning
+    # ------------------------------------------------------------------
+
+    def _start_scan(self):
+        game_folder = config.get("game_folder")
+        if not game_folder:
+            QMessageBox.warning(
+                self, "No Game Folder",
+                "Set the game folder path in Settings first."
+            )
+            return
+
+        dll_path = config.get("everything_dll") or None
+
+        try:
+            sdk = get_sdk(dll_path)
+        except EverythingError as e:
+            QMessageBox.critical(
+                self, "Everything SDK Error",
+                f"Could not initialize Everything SDK:\n{e}\n\n"
+                "Make sure Everything is running and the DLL path is correct."
+            )
+            return
+
+        presets = config.load_presets()
+        scanner = AssetScanner(game_folder, presets, sdk)
+
+        # Seed scanner with any already-loaded cached entries so it skips them
+        current_assets = self._browser.get_assets()
+        if current_assets:
+            scanner.seed_cache(current_assets)
+
+        self._scan_btn.setEnabled(False)
+        self._cancel_scan_btn.setEnabled(True)
+        self._statusbar.showMessage("Scanning...")
+        self._log.append(f"Scanning: {game_folder}", "info")
+
+        self._scan_worker = ScanWorker(scanner, self)
+        self._scan_worker.progress.connect(self._on_scan_progress)
+        self._scan_worker.finished.connect(self._on_scan_finished)
+        self._scan_worker.error.connect(self._on_scan_error)
+        self._scan_worker_running = True
+        self._scan_worker.start()
+
+    @Slot(int, int, str)
+    def _on_scan_progress(self, current: int, total: int, message: str):
+        self._statusbar.showMessage(f"Scanning: {message} ({current}/{total})")
+        self._queue.update_resolve_progress(current, total, message)
+
+    def _cancel_scan(self):
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._scan_worker.cancel()
+            self._cancel_scan_btn.setEnabled(False)
+            self._log.append("Cancelling scan...", "warning")
+            self._statusbar.showMessage("Cancelling scan...")
+
+    @Slot(list)
+    def _on_scan_finished(self, assets: list):
+        self._scan_btn.setEnabled(True)
+        self._cancel_scan_btn.setEnabled(False)
+        self._scan_worker_running = False
+        self._browser.set_assets(assets)
+        ready = sum(1 for a in assets if a.status == "ready")
+        count_msg = f"{len(assets)} assets found, {ready} ready"
+        self._log.append(f"Scan finished: {count_msg}", "success")
+        self._statusbar.showMessage(f"Scan finished: {count_msg}")
+        # Seed picker with already-processed paths
+        processed = [a.psk_path for a in assets if a.processed]
+        if processed:
+            self._psk_picker.mark_processed(processed)
+
+        # Save cache
+        game_folder = config.get("game_folder")
+        if game_folder and assets:
+            try:
+                cache_path = save_scan_cache(assets, game_folder)
+                self._log.append(
+                    f"Scan cached ({len(assets)} assets) — will auto-load next time",
+                    "info",
+                )
+            except Exception as e:
+                self._log.append(f"Failed to save cache: {e}", "warning")
+
+    @Slot(str)
+    def _on_scan_error(self, error: str):
+        self._scan_btn.setEnabled(True)
+        self._cancel_scan_btn.setEnabled(False)
+        self._scan_worker_running = False
+        self._log.append(f"Scan failed: {error}", "error")
+        self._statusbar.showMessage("Scan failed")
+        QMessageBox.critical(self, "Scan Error", error)
+
+    # ------------------------------------------------------------------
+    # Profile system
+    # ------------------------------------------------------------------
+
+    def _load_initial_profile(self):
+        """On startup, load the last-used profile (or first available)."""
+        profiles = self._profile_manager.list_profiles()
+        if not profiles:
+            self._profile_manager.create_profile("Default")
+            profiles = ["Default"]
+
+        saved = config.get("active_profile") or ""
+        if saved in profiles:
+            target = saved
+        else:
+            target = profiles[0]
+
+        self._profile_bar.refresh(select=target)
+        self._load_profile(target)
+
+    def _is_busy(self) -> bool:
+        """Return True if any background operation is running."""
+        if self._scan_worker_running:
+            return True
+        if self._unpacker_panel.is_exporting:
+            return True
+        if self._job_manager and self._job_manager.isRunning():
+            return True
+        return False
+
+    def _cancel_active_ops(self):
+        """Cancel whatever background operation is running."""
+        if self._scan_worker_running:
+            self._cancel_scan()
+        if self._unpacker_panel.is_exporting:
+            self._unpacker_panel._cancel_export()
+        if self._job_manager and self._job_manager.isRunning():
+            self._cancel_processing()
+
+    def _save_current_profile(self):
+        """Persist the current UI state into the active profile JSON."""
+        name = self._current_profile_name
+        if not name:
+            return
+
+        try:
+            data = self._profile_manager.load_profile(name)
+        except FileNotFoundError:
+            data = {}
+
+        # Merge unpacker + picker state
+        data.update(self._unpacker_panel.collect_for_profile())
+        data.update(self._psk_picker.collect_for_profile())
+
+        # Also update blender_output_dir from global config (legacy bridge)
+        data["blender_output_dir"] = data.get("blender_output_dir", "") or config.get("output_dir")
+
+        # Scan cache file
+        game_dir = data.get("game_dir", "")
+        if game_dir:
+            import hashlib
+            folder_hash = hashlib.md5(game_dir.encode()).hexdigest()[:12]
+            data["scan_cache_file"] = f"scan_{folder_hash}.json"
+
+        # Persist colour scheme into the profile
+        data["color_scheme"] = config.get("color_scheme") or theme.current_scheme_name()
+
+        self._profile_manager.save_profile(name, data)
+        log.debug("Saved profile: %s", name)
+
+    def _load_profile(self, name: str):
+        """Load a profile from disk and push its state to all panels."""
+        try:
+            data = self._profile_manager.load_profile(name)
+        except FileNotFoundError:
+            self._log.append(f"Profile '{name}' not found", "warning")
+            return
+
+        self._current_profile_name = name
+        config.set("active_profile", name)
+
+        # Push state to panels
+        self._unpacker_panel.load_from_profile(data)
+
+        # Clear queue and log when switching profiles
+        self._queue.clear_queue()
+        self._log.clear()
+
+        # Also set game_folder in global config so other parts (scanner, etc.) can read it
+        game_dir = data.get("game_dir", "")
+        config.set("game_folder", game_dir)
+        config.set("unpack_output_dir", data.get("unpack_output_dir", ""))
+        config.set("unpack_ue_version", data.get("ue_version", "GAME_UE5_4"))
+
+        # Apply profile's colour scheme if it has one
+        profile_scheme = data.get("color_scheme", "")
+        if profile_scheme:
+            config.set("color_scheme", profile_scheme)
+            app = QApplication.instance()
+            if app:
+                theme.apply(app, profile_scheme)
+
+        blender_out = data.get("blender_output_dir", "")
+        if blender_out:
+            config.set("output_dir", blender_out)
+
+        # Load scan cache for this profile
+        self._browser.set_assets([])  # clear first
+        scan_cache_file = data.get("scan_cache_file", "")
+        if game_dir and scan_cache_file:
+            result = load_scan_cache(game_dir)
+            if result is not None:
+                assets, timestamp = result
+                import datetime
+                age = datetime.datetime.now() - datetime.datetime.fromtimestamp(timestamp)
+                if age.days > 0:
+                    age_str = f"{age.days}d ago"
+                elif age.seconds >= 3600:
+                    age_str = f"{age.seconds // 3600}h ago"
+                else:
+                    age_str = f"{age.seconds // 60}m ago"
+
+                self._browser.set_assets(assets)
+                ready = sum(1 for a in assets if a.status == "ready")
+                msg = f"[{name}] Loaded {len(assets)} cached assets ({ready} ready, scanned {age_str})"
+                self._log.append(msg, "info")
+                self._statusbar.showMessage(msg)
+
+                # Seed picker with already-processed paths
+                processed = [a.psk_path for a in assets if a.processed]
+                if processed:
+                    self._psk_picker.mark_processed(processed)
+
+        # Load PSK picker state (after cache so processed lists merge correctly)
+        self._psk_picker.load_from_profile(data)
+
+        self.setWindowTitle(f"EfficientAssetRipper — {name}")
+
+    def _switch_profile(self, name: str):
+        """Save current profile, then load the new one."""
+        if name == self._current_profile_name:
+            return
+        self._save_current_profile()
+        self._load_profile(name)
+        self._profile_bar.set_current(name)
+
+    def _on_profile_created(self, name: str):
+        """Handle a newly created profile — switch to it."""
+        self._save_current_profile()
+        self._load_profile(name)
+
+    def _on_profile_deleted(self, name: str):
+        """Handle profile deletion (ProfileBar already switched to next)."""
+        self._log.append(f"Deleted profile: {name}", "info")
+
+    def _on_profile_renamed(self, old: str, new: str):
+        """Handle profile rename."""
+        if self._current_profile_name == old:
+            self._current_profile_name = new
+            config.set("active_profile", new)
+            self.setWindowTitle(f"EfficientAssetRipper — {new}")
+        self._log.append(f"Renamed profile: {old} → {new}", "info")
+
+    # ------------------------------------------------------------------
+    # Queue management
+    # ------------------------------------------------------------------
+
+    def _add_browser_to_queue(self, assets: list[AssetEntry]):
+        """Add assets from the browser's 'Add to Queue' button."""
+        count = len(assets)
+        self._queue.add_to_queue(assets)
+        self._log.append(f"Added {count} assets to queue from browser", "info")
+        # Switch to queue tab so user sees the result
+        self._right_tabs.setCurrentIndex(0)
+
+    def _add_picker_to_queue(self, paths: list[Path]):
+        """Resolve PSK paths from the picker and add to queue."""
+        # Use unpack_output_dir (where exported PSK/props/TGA files live) when
+        # set; fall back to game_folder for single-directory setups.
+        game_folder = config.get("unpack_output_dir") or config.get("game_folder")
+        if not game_folder:
+            QMessageBox.warning(self, "No Game Folder", "Set the game folder in Settings first.")
+            return
+
+        dll_path = config.get("everything_dll") or None
+        try:
+            sdk = get_sdk(dll_path)
+        except EverythingError as e:
+            QMessageBox.critical(self, "Everything SDK Error", str(e))
+            return
+
+        presets = config.load_presets()
+        scanner = AssetScanner(game_folder, presets, sdk)
+
+        self._log.append(f"Resolving {len(paths)} picked PSK files...", "info")
+        self._statusbar.showMessage(f"Resolving {len(paths)} picked files...")
+
+        # Build stub AssetEntry objects for each path
+        from core.classifier import classify
+        entries: list[AssetEntry] = []
+        for p in paths:
+            e = AssetEntry(psk_path=p, name=p.stem)
+            cat = classify(p, game_folder)
+            e.category = cat.category
+            e.subcategory = cat.subcategory
+            entries.append(e)
+
+        self._picker_entries = entries
+        self._picker_worker = _PickerResolveWorker(scanner, entries, self)
+        self._picker_worker.progress.connect(self._on_scan_progress)
+        self._picker_worker.finished.connect(self._on_picker_resolved)
+        self._picker_worker.error.connect(self._on_scan_error)
+        self._queue.set_resolving(True)
+        self._picker_worker.start()
+
+    @Slot(int, int)
+    def _on_picker_resolved(self, resolved: int, still_incomplete: int):
+        self._queue.set_resolving(False)
+        entries = self._picker_entries
+        self._queue.add_to_queue(entries)
+        # Merge picker entries into the browser so they appear in the asset list
+        self._merge_entries_into_browser(entries)
+        msg = f"Added {len(entries)} picked assets to queue ({resolved} ready)"
+        self._log.append(msg, "info")
+        self._statusbar.showMessage(msg)
+        self._right_tabs.setCurrentIndex(0)
+
+    # ------------------------------------------------------------------
+    # Processing
+    # ------------------------------------------------------------------
+
+    def _process_queue(self):
+        """Process all pending items currently in the queue."""
+        pending = self._queue.get_pending_assets()
+        if pending:
+            self._start_processing(pending)
+        else:
+            QMessageBox.information(
+                self, "Nothing to Process",
+                "No pending items in the queue. Add assets first."
+            )
+
+    def _start_processing(self, assets: list[AssetEntry]):
+        if not assets:
+            QMessageBox.information(
+                self, "Nothing Selected",
+                "Select assets in the browser first."
+            )
+            return
+
+        blender_exe = config.get("blender_exe")
+        if not blender_exe:
+            QMessageBox.warning(
+                self, "Blender Not Set",
+                "Set the Blender executable path in Settings."
+            )
+            return
+
+        output_dir = config.get("output_dir")
+        if not output_dir:
+            QMessageBox.warning(
+                self, "Output Directory Not Set",
+                "Set the output directory in Settings."
+            )
+            return
+
+        addon_name = config.get("psk_addon_name")
+        timeout = config.get_int("timeout_seconds") or 120
+
+        # Set up queue panel for this batch
+        batch_offset = self._queue.get_pending_offset()
+        self._queue.begin_processing(batch_offset, len(assets))
+        self._queue.set_processing(True)
+
+        self._log.append(
+            f"Starting batch: {len(assets)} assets → {output_dir}", "info"
+        )
+
+        self._job_manager = JobManager(
+            assets=assets,
+            blender_exe=blender_exe,
+            output_dir=output_dir,
+            addon_name=addon_name,
+            timeout=timeout,
+            parent=self,
+        )
+
+        # Connect signals
+        self._job_manager.job_started.connect(self._queue.on_job_started)
+        self._job_manager.job_completed.connect(self._queue.on_job_completed)
+        self._job_manager.job_progress.connect(self._queue.on_job_progress)
+        self._job_manager.queue_finished.connect(self._queue.on_queue_finished)
+        self._job_manager.log_message.connect(self._log.append)
+        self._job_manager.queue_finished.connect(self._on_processing_done)
+
+        self._job_manager.start()
+
+    def _cancel_processing(self):
+        if self._job_manager and self._job_manager.isRunning():
+            self._job_manager.cancel()
+            self._log.append("Cancelling batch...", "warning")
+
+    @Slot(int, int, int)
+    def _on_processing_done(self, total: int, succeeded: int, failed: int):
+        self._statusbar.showMessage(
+            f"Batch done: {succeeded}/{total} succeeded, {failed} failed"
+        )
+        # Refresh browser to show blend paths and processed status
+        self._browser.refresh_tree()
+        # Re-save cache with updated blend_path / processed data
+        self._save_cache()
+        # Mark processed items in PSK picker so they can't be re-queued
+        processed = [
+            a.psk_path for a in self._browser._assets if a.processed
+        ]
+        if processed:
+            self._psk_picker.mark_processed(processed)
+
+    # ------------------------------------------------------------------
+    # Reprocess
+    # ------------------------------------------------------------------
+
+    def _reprocess_asset(self, asset):
+        """Reprocess a single asset (overwrites existing .blend)."""
+        asset.processed = False
+        self._queue.add_to_queue([asset])
+        self._right_tabs.setCurrentIndex(0)
+        self._log.append(f"Queued for reprocessing: {asset.name}", "info")
+
+    # ------------------------------------------------------------------
+    # Browser / cache helpers
+    # ------------------------------------------------------------------
+
+    def _merge_entries_into_browser(self, entries: list):
+        """Merge entries into the browser's asset list (de-duplicate by psk_path)."""
+        existing = {str(a.psk_path): a for a in self._browser._assets}
+        added = 0
+        for e in entries:
+            key = str(e.psk_path)
+            if key not in existing:
+                self._browser._assets.append(e)
+                existing[key] = e
+                added += 1
+            else:
+                # Update the existing entry with any new data
+                ex = existing[key]
+                if not ex.materials and e.materials:
+                    ex.materials = e.materials
+                    ex.total_textures = e.total_textures
+                    ex.missing_textures = e.missing_textures
+                    ex.mesh_props_found = e.mesh_props_found
+        if added:
+            self._browser._populate_category_filter()
+        self._browser.refresh_tree()
+
+    def _save_cache(self):
+        """Save the browser's current assets to the scan cache and update profile."""
+        game_folder = config.get("game_folder")
+        if game_folder and self._browser._assets:
+            try:
+                save_scan_cache(self._browser._assets, game_folder)
+            except Exception:
+                pass
+        self._save_current_profile()
+
+    def _on_browser_delete(self, assets: list):
+        """Handle deletion of assets from the browser — save updated cache."""
+        names = [a.name for a in assets]
+        self._log.append(f"Removed {len(assets)} asset(s): {', '.join(names)}", "info")
+        # Un-mark deleted assets in the picker so they become selectable again
+        self._psk_picker.unmark_processed([a.psk_path for a in assets])
+        self._save_cache()
+
+    # ------------------------------------------------------------------
+    # Re-scan incomplete entries
+    # ------------------------------------------------------------------
+
+    def _rescan_selected(self, entries: list):
+        game_folder = config.get("game_folder")
+        if not game_folder:
+            QMessageBox.warning(self, "No Game Folder", "Set the game folder in Settings first.")
+            return
+
+        dll_path = config.get("everything_dll") or None
+        try:
+            sdk = get_sdk(dll_path)
+        except EverythingError as e:
+            QMessageBox.critical(self, "Everything SDK Error", str(e))
+            return
+
+        presets = config.load_presets()
+        scanner = AssetScanner(game_folder, presets, sdk)
+
+        self._log.append(f"Re-scanning {len(entries)} incomplete entries...", "info")
+        self._scan_btn.setEnabled(False)
+        self._statusbar.showMessage(f"Re-scanning {len(entries)} entries...")
+
+        self._rescan_worker = RescanWorker(scanner, entries, self)
+        self._rescan_worker.progress.connect(self._on_scan_progress)
+        self._rescan_worker.finished.connect(self._on_rescan_finished)
+        self._rescan_worker.error.connect(self._on_scan_error)
+        self._rescan_worker.start()
+
+    @Slot(int, int)
+    def _on_rescan_finished(self, resolved: int, still_incomplete: int):
+        self._scan_btn.setEnabled(True)
+        self._browser.refresh_tree()
+        msg = f"Re-scan done: {resolved} resolved, {still_incomplete} still incomplete"
+        self._log.append(msg, "success" if still_incomplete == 0 else "info")
+        self._statusbar.showMessage(msg)
+
+        # Update cache
+        game_folder = config.get("game_folder")
+        if game_folder and self._browser._assets:
+            try:
+                save_scan_cache(self._browser._assets, game_folder)
+                self._log.append("Cache updated", "info")
+            except Exception as e:
+                self._log.append(f"Failed to save cache: {e}", "warning")
+
+    # ------------------------------------------------------------------
+    # Unpacker hand-off
+    # ------------------------------------------------------------------
+
+    def _on_psks_extracted(self, psk_paths: list):
+        """Receive extracted PSK files from the Unpacker and add to queue."""
+        from core.classifier import classify
+
+        game_folder = config.get("game_folder") or config.get("unpack_output_dir") or ""
+        entries = []
+        for p in psk_paths:
+            e = AssetEntry(psk_path=p, name=p.stem)
+            if game_folder:
+                cat = classify(p, game_folder)
+                e.category = cat.category
+                e.subcategory = cat.subcategory
+            entries.append(e)
+
+        self._queue.add_to_queue(entries)
+        self._merge_entries_into_browser(entries)
+        msg = f"Added {len(entries)} extracted PSK files to queue"
+        self._log.append(msg, "info")
+        self._statusbar.showMessage(msg)
+        self._right_tabs.setCurrentIndex(0)
+
+    def closeEvent(self, event):
+        """Save profile and stop the CLI process on exit."""
+        self._save_current_profile()
+        self._unpacker_panel.shutdown()
+        super().closeEvent(event)

@@ -1,0 +1,663 @@
+"""Full asset discovery pipeline.
+
+Scans game folder for PSK/PSKX files via Everything SDK, resolves their
+materials and textures, and produces a list of AssetEntry objects ready
+for batch processing.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import struct
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+from core.everything import EverythingSDK, get_sdk
+from core.classifier import AssetCategory, classify
+from core.props_parser import (
+    MaterialRef,
+    parse_material_props_file,
+    parse_mesh_props_file,
+)
+from core.texture_resolver import (
+    ResolvedTexture,
+    TextureResolution,
+    UnresolvedTexture,
+    resolve_textures,
+)
+
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MaterialEntry:
+    """Resolved material with its textures."""
+    slot_name: str
+    material_name: str
+    textures: list[ResolvedTexture] = field(default_factory=list)
+    unresolved: list[UnresolvedTexture] = field(default_factory=list)
+    props_found: bool = True
+    preset_used: str = "default_pbr"
+    bsdf_overrides: dict = field(default_factory=dict)
+    color_tints: dict = field(default_factory=dict)
+    scalar_params: dict = field(default_factory=dict)
+    parent_name: str = ""
+
+
+@dataclass
+class AssetEntry:
+    """A fully-resolved PSK/PSKX asset ready for processing."""
+    psk_path: Path
+    name: str
+    materials: list[MaterialEntry] = field(default_factory=list)
+    mesh_props_found: bool = True
+    total_textures: int = 0
+    missing_textures: int = 0
+    category: str = "Uncategorized"
+    subcategory: str = "General"
+    blend_path: Optional[Path] = None
+    processed: bool = False
+
+    @property
+    def status(self) -> str:
+        if self.processed:
+            return "processed"
+        if not self.mesh_props_found:
+            return "no_props"
+        if self.missing_textures > 0:
+            return "missing_textures"
+        if not self.materials:
+            return "no_materials"
+        return "ready"
+
+    @property
+    def status_text(self) -> str:
+        s = self.status
+        if s == "processed":
+            return "Processed"
+        if s == "ready":
+            return f"Ready ({self.total_textures} textures)"
+        elif s == "missing_textures":
+            return f"Missing {self.missing_textures}/{self.total_textures}"
+        elif s == "no_props":
+            return "No .props.txt found"
+        elif s == "no_materials":
+            return "No materials"
+        return s
+
+    def to_manifest(self, output_path: Path, addon_name: str) -> dict:
+        """Convert to a JSON manifest for the Blender processing script."""
+        materials = {}
+        for mat in self.materials:
+            textures = {}
+            for tex in mat.textures:
+                textures[tex.slot] = {
+                    "path": str(tex.path),
+                    "colorspace": tex.colorspace,
+                    "wiring": tex.wiring,
+                }
+            materials[mat.slot_name] = {
+                "material_name": mat.material_name,
+                "textures": textures,
+                "bsdf_overrides": mat.bsdf_overrides,
+                "color_tints": mat.color_tints,
+            }
+
+        return {
+            "psk_path": str(self.psk_path),
+            "output_path": str(output_path),
+            "addon_name": addon_name,
+            "materials": materials,
+        }
+
+
+# ---------------------------------------------------------------------------
+# PSK binary material extraction
+# ---------------------------------------------------------------------------
+
+def _extract_psk_materials(psk_path: Path) -> list[str]:
+    """Read material names from the MATT0000 chunk in a PSK/PSKX file.
+
+    Returns a list of material name strings, or an empty list on failure.
+    """
+    try:
+        data = psk_path.read_bytes()
+    except (OSError, IOError) as e:
+        log.warning("Could not read PSK file %s: %s", psk_path, e)
+        return []
+
+    names: list[str] = []
+    offset = 0
+    size = len(data)
+    while offset < size:
+        if offset + 32 > size:
+            break
+        chunk_id = data[offset:offset + 20].split(b"\x00")[0]
+        try:
+            chunk_id_str = chunk_id.decode("ascii")
+        except UnicodeDecodeError:
+            break
+        dsize = struct.unpack_from("<I", data, offset + 24)[0]
+        dcount = struct.unpack_from("<I", data, offset + 28)[0]
+        chunk_bytes = dsize * dcount
+
+        if chunk_id_str == "MATT0000":
+            chunk_data = data[offset + 32: offset + 32 + chunk_bytes]
+            for i in range(dcount):
+                mat_data = chunk_data[i * dsize: (i + 1) * dsize]
+                mat_name = mat_data[:64].split(b"\x00")[0].decode(
+                    "ascii", errors="replace"
+                )
+                if mat_name:
+                    names.append(mat_name)
+            break  # found MATT chunk, no need to keep scanning
+
+        offset += 32 + chunk_bytes
+
+    return names
+
+
+# ---------------------------------------------------------------------------
+# Scanner
+# ---------------------------------------------------------------------------
+
+class AssetScanner:
+    """Discovers and resolves all assets in a game folder."""
+
+    def __init__(
+        self,
+        game_folder: str,
+        presets_data: dict,
+        sdk: Optional[EverythingSDK] = None,
+    ):
+        self.game_folder = game_folder
+        self.presets_data = presets_data
+        self.sdk = sdk or get_sdk()
+        self._cache: list[AssetEntry] = []
+        self._cancelled = False
+
+    @property
+    def cached_results(self) -> list[AssetEntry]:
+        return list(self._cache)
+
+    def cancel(self):
+        self._cancelled = True
+
+    def seed_cache(self, entries: list[AssetEntry]):
+        """Pre-populate the cache with previously resolved entries.
+
+        When scan() runs, any PSK path already present will be reused
+        instead of re-resolved.
+        """
+        self._cache = list(entries)
+
+    def scan(self, progress_callback=None) -> list[AssetEntry]:
+        """Run full scan. Returns list of AssetEntry.
+
+        Args:
+            progress_callback: Optional callable(current, total, message)
+                for reporting progress to the GUI.
+        """
+        self._cancelled = False
+
+        # Build lookup of already-cached entries by PSK path
+        existing = {str(e.psk_path): e for e in self._cache}
+        self._cache.clear()
+
+        # 1. Find all PSK/PSKX files
+        log.info("Searching for PSK/PSKX files in %s", self.game_folder)
+        psk_files = self.sdk.find_psk_files(folder=self.game_folder)
+        total = len(psk_files)
+        log.info("Found %d PSK/PSKX files", total)
+
+        if progress_callback:
+            progress_callback(0, total, f"Found {total} meshes, resolving...")
+
+        overrides = self.presets_data.get("material_overrides", {})
+
+        for idx, psk_path in enumerate(psk_files):
+            if self._cancelled:
+                log.info("Scan cancelled at %d/%d", idx, total)
+                if progress_callback:
+                    progress_callback(idx, total, "Scan cancelled")
+                break
+
+            # Reuse cached entry if it was already resolved
+            cached_entry = existing.get(str(psk_path))
+            if cached_entry is not None and cached_entry.mesh_props_found:
+                self._cache.append(cached_entry)
+                if progress_callback:
+                    progress_callback(idx, total, f"Cached: {psk_path.stem}")
+                continue
+
+            asset_name = psk_path.stem
+            entry = AssetEntry(psk_path=psk_path, name=asset_name)
+
+            # Classify by folder path
+            cat = classify(psk_path, self.game_folder)
+            entry.category = cat.category
+            entry.subcategory = cat.subcategory
+
+            if progress_callback:
+                progress_callback(idx, total, f"Resolving: {asset_name}")
+
+            # 2. Find companion mesh .props.txt
+            self._resolve_mesh(entry, overrides)
+
+            self._cache.append(entry)
+
+        # Sort by name
+        self._cache.sort(key=lambda a: a.name.lower())
+
+        if not self._cancelled and progress_callback:
+            progress_callback(total, total, "Scan complete")
+
+        return list(self._cache)
+
+    def _resolve_mesh(self, entry: AssetEntry, overrides: dict):
+        """Find mesh props, parse materials, resolve textures."""
+        # Find mesh props file
+        props_files = self.sdk.find_props_file(
+            entry.name, folder=self.game_folder
+        )
+        if not props_files:
+            entry.mesh_props_found = False
+            log.warning("No .props.txt found for %s", entry.name)
+            return
+
+        # Pick closest props file to the PSK
+        props_path = props_files[0]
+        if len(props_files) > 1:
+            from core.texture_resolver import _pick_closest_path
+            props_path = _pick_closest_path(props_files, entry.psk_path)
+
+        try:
+            mesh_props = parse_mesh_props_file(props_path)
+        except Exception as e:
+            log.error("Failed to parse %s: %s", props_path, e)
+            entry.mesh_props_found = False
+            return
+
+        mat_refs = mesh_props.materials
+
+        # Fallback: if props file has no materials, extract from PSK binary
+        if not mat_refs:
+            psk_mat_names = _extract_psk_materials(entry.psk_path)
+            if psk_mat_names:
+                log.info(
+                    "Props for %s has no materials; extracted %d from PSK binary",
+                    entry.name, len(psk_mat_names),
+                )
+                mat_refs = [
+                    MaterialRef(
+                        slot_name=name,
+                        material_name=name,
+                        asset_path="",
+                    )
+                    for name in psk_mat_names
+                ]
+
+        # 3. For each material, find its props and resolve textures
+        for mat_ref in mat_refs:
+            mat_entry = self._resolve_material(mat_ref, entry.psk_path, overrides)
+            # If material has no textures but has a parent, trace the chain
+            if not mat_entry.textures and mat_entry.parent_name:
+                self._resolve_parent_chain(mat_entry, entry.psk_path, overrides)
+            entry.materials.append(mat_entry)
+            entry.total_textures += len(mat_entry.textures) + len(mat_entry.unresolved)
+            entry.missing_textures += len(mat_entry.unresolved)
+
+    def _resolve_material(
+        self, mat_ref: MaterialRef, psk_path: Path, overrides: dict
+    ) -> MaterialEntry:
+        """Resolve a single material's textures."""
+        mat_entry = MaterialEntry(
+            slot_name=mat_ref.slot_name,
+            material_name=mat_ref.material_name,
+        )
+
+        # Check BSDF overrides
+        if mat_ref.material_name in overrides:
+            mat_entry.bsdf_overrides = overrides[mat_ref.material_name].get(
+                "bsdf_overrides", {}
+            )
+
+        # Find material .props.txt
+        mat_props_files = self.sdk.find_props_file(
+            mat_ref.material_name, folder=self.game_folder
+        )
+        if not mat_props_files:
+            mat_entry.props_found = False
+            log.warning(
+                "No .props.txt for material %s", mat_ref.material_name
+            )
+            return mat_entry
+
+        mat_props_path = mat_props_files[0]
+        if len(mat_props_files) > 1:
+            from core.texture_resolver import _pick_closest_path
+            mat_props_path = _pick_closest_path(mat_props_files, psk_path)
+
+        try:
+            mat_props = parse_material_props_file(mat_props_path)
+        except Exception as e:
+            log.error("Failed to parse %s: %s", mat_props_path, e)
+            mat_entry.props_found = False
+            return mat_entry
+
+        # Store parent reference for chain traversal
+        mat_entry.parent_name = mat_props.parent_name
+
+        # Resolve textures
+        tex_names = [t.texture_name for t in mat_props.textures]
+        param_name_map = {
+            t.texture_name: t.param_name
+            for t in mat_props.textures if t.param_name
+        }
+        if not tex_names:
+            # Even with no textures, store color tints/scalar params if available
+            if mat_props.color_tints:
+                mat_entry.color_tints = mat_props.color_tints
+            if mat_props.scalar_params:
+                mat_entry.scalar_params = mat_props.scalar_params
+            return mat_entry
+
+        resolution = resolve_textures(
+            texture_names=tex_names,
+            presets_data=self.presets_data,
+            sdk=self.sdk,
+            material_name=mat_ref.material_name,
+            reference_path=psk_path,
+            game_folder=self.game_folder,
+            param_name_map=param_name_map,
+        )
+
+        mat_entry.textures = resolution.resolved
+        mat_entry.unresolved = resolution.unresolved
+        mat_entry.preset_used = resolution.preset_used
+
+        # Store color tints and scalar params from material props
+        if mat_props.color_tints:
+            mat_entry.color_tints = mat_props.color_tints
+        if mat_props.scalar_params:
+            mat_entry.scalar_params = mat_props.scalar_params
+
+        return mat_entry
+
+    def _resolve_parent_chain(
+        self, mat_entry: MaterialEntry, psk_path: Path, overrides: dict
+    ):
+        """Trace parent material chain to find textures for a textureless material."""
+        visited: set[str] = {mat_entry.material_name}
+        child_color_tints = dict(mat_entry.color_tints)
+        child_scalar_params = dict(mat_entry.scalar_params)
+        current_parent = mat_entry.parent_name
+
+        while current_parent and current_parent not in visited:
+            visited.add(current_parent)
+            log.info(
+                "Material %s has no textures, tracing parent: %s",
+                mat_entry.material_name, current_parent,
+            )
+
+            parent_props_files = self.sdk.find_props_file(
+                current_parent, folder=self.game_folder
+            )
+            if not parent_props_files:
+                log.warning(
+                    "Parent material %s .props.txt not found (chain from %s)",
+                    current_parent, mat_entry.material_name,
+                )
+                break
+
+            parent_props_path = parent_props_files[0]
+            if len(parent_props_files) > 1:
+                from core.texture_resolver import _pick_closest_path
+                parent_props_path = _pick_closest_path(
+                    parent_props_files, psk_path
+                )
+
+            try:
+                parent_props = parse_material_props_file(parent_props_path)
+            except Exception as e:
+                log.error(
+                    "Failed to parse parent %s: %s", parent_props_path, e
+                )
+                break
+
+            tex_names = [t.texture_name for t in parent_props.textures]
+            param_name_map = {
+                t.texture_name: t.param_name
+                for t in parent_props.textures if t.param_name
+            }
+
+            if tex_names:
+                # Found textures in this ancestor — resolve them
+                resolution = resolve_textures(
+                    texture_names=tex_names,
+                    presets_data=self.presets_data,
+                    sdk=self.sdk,
+                    material_name=current_parent,
+                    reference_path=psk_path,
+                    game_folder=self.game_folder,
+                    param_name_map=param_name_map,
+                )
+                mat_entry.textures = resolution.resolved
+                mat_entry.unresolved = resolution.unresolved
+                mat_entry.preset_used = resolution.preset_used
+
+                # Merge color_tints: start with parent, overlay child values
+                merged_tints = dict(parent_props.color_tints)
+                merged_tints.update(child_color_tints)
+                mat_entry.color_tints = merged_tints
+
+                # Merge scalar_params: start with parent, overlay child values
+                merged_scalars = dict(parent_props.scalar_params)
+                merged_scalars.update(child_scalar_params)
+                mat_entry.scalar_params = merged_scalars
+
+                log.info(
+                    "Found %d textures in ancestor %s for material %s",
+                    len(resolution.resolved), current_parent,
+                    mat_entry.material_name,
+                )
+                return
+
+            # No textures here either — collect params and continue up
+            # Parent params are base; child values already collected override them
+            for k, v in parent_props.color_tints.items():
+                if k not in child_color_tints:
+                    child_color_tints[k] = v
+            for k, v in parent_props.scalar_params.items():
+                if k not in child_scalar_params:
+                    child_scalar_params[k] = v
+
+            current_parent = parent_props.parent_name
+
+        log.warning(
+            "Parent chain exhausted for %s — no textures found",
+            mat_entry.material_name,
+        )
+
+    def resolve_entry(self, entry: AssetEntry) -> AssetEntry:
+        """Re-resolve a single entry from scratch (keeps psk_path/category).
+
+        Useful for re-scanning incomplete entries that were missing props or
+        textures without re-running the full scan.
+        """
+        overrides = self.presets_data.get("material_overrides", {})
+        entry.materials.clear()
+        entry.mesh_props_found = True
+        entry.total_textures = 0
+        entry.missing_textures = 0
+        self._resolve_mesh(entry, overrides)
+        return entry
+
+
+# ---------------------------------------------------------------------------
+# Scan cache persistence
+# ---------------------------------------------------------------------------
+
+_CACHE_VERSION = 1
+_DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
+
+
+def _get_cache_path(game_folder: str) -> Path:
+    """Return cache file path derived from the game folder."""
+    # Use a hash of the game folder to support multiple game projects
+    import hashlib
+    folder_hash = hashlib.md5(game_folder.encode()).hexdigest()[:12]
+    return _DEFAULT_CACHE_DIR / f"scan_{folder_hash}.json"
+
+
+def _asset_to_dict(entry: AssetEntry) -> dict:
+    """Serialize an AssetEntry to a plain dict."""
+    materials = []
+    for m in entry.materials:
+        materials.append({
+            "slot_name": m.slot_name,
+            "material_name": m.material_name,
+            "textures": [
+                {
+                    "slot": t.slot,
+                    "texture_name": t.texture_name,
+                    "path": str(t.path),
+                    "colorspace": t.colorspace,
+                    "wiring": t.wiring,
+                }
+                for t in m.textures
+            ],
+            "unresolved": [
+                {"texture_name": u.texture_name, "reason": u.reason}
+                for u in m.unresolved
+            ],
+            "props_found": m.props_found,
+            "preset_used": m.preset_used,
+            "bsdf_overrides": m.bsdf_overrides,
+            "color_tints": m.color_tints,
+            "scalar_params": m.scalar_params,
+            "parent_name": m.parent_name,
+        })
+    return {
+        "psk_path": str(entry.psk_path),
+        "name": entry.name,
+        "materials": materials,
+        "mesh_props_found": entry.mesh_props_found,
+        "total_textures": entry.total_textures,
+        "missing_textures": entry.missing_textures,
+        "category": entry.category,
+        "subcategory": entry.subcategory,
+        "blend_path": str(entry.blend_path) if entry.blend_path else None,
+        "processed": entry.processed,
+    }
+
+
+def _dict_to_asset(d: dict) -> AssetEntry:
+    """Deserialize a plain dict back to an AssetEntry."""
+    materials = []
+    for md in d.get("materials", []):
+        textures = [
+            ResolvedTexture(
+                slot=t["slot"],
+                texture_name=t["texture_name"],
+                path=Path(t["path"]),
+                colorspace=t["colorspace"],
+                wiring=t.get("wiring", {}),
+            )
+            for t in md.get("textures", [])
+        ]
+        unresolved = [
+            UnresolvedTexture(
+                texture_name=u["texture_name"],
+                reason=u["reason"],
+            )
+            for u in md.get("unresolved", [])
+        ]
+        materials.append(MaterialEntry(
+            slot_name=md["slot_name"],
+            material_name=md["material_name"],
+            textures=textures,
+            unresolved=unresolved,
+            props_found=md.get("props_found", True),
+            preset_used=md.get("preset_used", "default_pbr"),
+            bsdf_overrides=md.get("bsdf_overrides", {}),
+            color_tints=md.get("color_tints", {}),
+            scalar_params=md.get("scalar_params", {}),
+            parent_name=md.get("parent_name", ""),
+        ))
+
+    bp = d.get("blend_path")
+    blend_path = Path(bp) if bp else None
+    processed = d.get("processed", False)
+    # Auto-detect processed state from existing blend file on disk
+    if blend_path and not processed and blend_path.is_file():
+        processed = True
+    return AssetEntry(
+        psk_path=Path(d["psk_path"]),
+        name=d["name"],
+        materials=materials,
+        mesh_props_found=d.get("mesh_props_found", True),
+        total_textures=d.get("total_textures", 0),
+        missing_textures=d.get("missing_textures", 0),
+        category=d.get("category", "Uncategorized"),
+        subcategory=d.get("subcategory", "General"),
+        blend_path=blend_path,
+        processed=processed,
+    )
+
+
+def save_scan_cache(assets: list[AssetEntry], game_folder: str) -> Path:
+    """Save scan results to a JSON cache file. Returns the cache path."""
+    cache_path = _get_cache_path(game_folder)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = {
+        "version": _CACHE_VERSION,
+        "game_folder": game_folder,
+        "timestamp": time.time(),
+        "asset_count": len(assets),
+        "assets": [_asset_to_dict(a) for a in assets],
+    }
+
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, separators=(",", ":"))
+
+    log.info("Saved scan cache: %d assets → %s", len(assets), cache_path)
+    return cache_path
+
+
+def load_scan_cache(game_folder: str) -> tuple[list[AssetEntry], float] | None:
+    """Load cached scan results if available.
+
+    Returns:
+        (assets, timestamp) tuple, or None if no cache exists.
+    """
+    cache_path = _get_cache_path(game_folder)
+    if not cache_path.is_file():
+        return None
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if data.get("version") != _CACHE_VERSION:
+            log.warning("Cache version mismatch, ignoring")
+            return None
+
+        if data.get("game_folder") != game_folder:
+            return None
+
+        assets = [_dict_to_asset(d) for d in data.get("assets", [])]
+        timestamp = data.get("timestamp", 0.0)
+        log.info("Loaded scan cache: %d assets from %s", len(assets), cache_path)
+        return assets, timestamp
+    except Exception as e:
+        log.error("Failed to load scan cache: %s", e)
+        return None

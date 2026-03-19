@@ -1,0 +1,361 @@
+{
+  "_comment": "Texture wiring presets — controls how textures are discovered, classified, and wired into Blender's Principled BSDF. Edit this file to add new suffix patterns, change channel mappings, or create per-material overrides.",
+
+  "version": 1,
+
+  "ignore_textures": ["DefaultTexture"],
+  "ignore_patterns": ["BlendFunc"],
+
+  "presets": {
+    "default_pbr": {
+      "description": "Standard PBR with packed ORM/RMA maps. Handles most UE5 assets.",
+      "priority_order": [
+        "base_color",
+        "alb",
+        "orm",
+        "rma",
+        "normal",
+        "nor",
+        "nrm_normal",
+        "metallic",
+        "roughness",
+        "refl",
+        "ao",
+        "ao_masks",
+        "emissive",
+        "alpha",
+        "specular",
+        "height",
+        "id_mask",
+        "rgb_masks",
+        "packed_nrm"
+      ],
+
+      "texture_slots": {
+        "base_color": {
+          "suffixes": [
+            "_C",
+            "_CS",
+            "_Diffuse",
+            "_D",
+            "_BaseColor",
+            "_BC",
+            "_Albedo",
+            "_Color"
+          ],
+          "param_names": [
+            "BaseColor",
+            "Diffuse",
+            "Base Color",
+            "DiffuseTexture",
+            "Color"
+          ],
+          "colorspace": "sRGB",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Base Color"
+          }
+        },
+
+        "orm": {
+          "suffixes": ["_ORM", "_OcclusionRoughnessMetallic"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "split_channels",
+            "channels": {
+              "R": {
+                "target_input": "BASE_COLOR_MIX",
+                "method": "ao_multiply",
+                "label": "Occlusion"
+              },
+              "G": { "target_input": "Roughness", "label": "Roughness" },
+              "B": { "target_input": "Metallic", "label": "Metallic" }
+            }
+          }
+        },
+
+        "rma": {
+          "suffixes": ["_RMA", "_RoughnessMetallicAO"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "split_channels",
+            "channels": {
+              "R": { "target_input": "Roughness", "label": "Roughness" },
+              "G": { "target_input": "Metallic", "label": "Metallic" },
+              "B": {
+                "target_input": "BASE_COLOR_MIX",
+                "method": "ao_multiply",
+                "label": "Occlusion"
+              }
+            }
+          }
+        },
+
+        "normal": {
+          "suffixes": ["_N", "_Normal", "_Norm"],
+          "param_names": ["Normal", "NormalMap", "NormalTexture"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "normal_map",
+            "target_input": "Normal"
+          }
+        },
+
+        "nrm_normal": {
+          "suffixes": ["_NRM"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "normal_map",
+            "target_input": "Normal"
+          },
+          "_note": "NRM is treated as Normal by default. If you need it as a packed Normal+Roughness+Metallic map, create a material override below."
+        },
+
+        "emissive": {
+          "suffixes": ["_E", "_Emissive", "_Glow", "_Emission", "_EmisiveC"],
+          "param_names": ["Emissive", "EmissiveColor", "EmissiveTexture"],
+          "colorspace": "sRGB",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Emission Color"
+          }
+        },
+
+        "alpha": {
+          "suffixes": ["_A", "_Alpha", "_Opacity"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Alpha"
+          }
+        },
+
+        "metallic": {
+          "suffixes": ["_M", "_Metallic", "_Met", "_Metal"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Metallic"
+          }
+        },
+
+        "roughness": {
+          "suffixes": ["_R", "_Roughness", "_Rough"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Roughness"
+          }
+        },
+
+        "ao": {
+          "suffixes": ["_AO", "_Occlusion", "_O"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "direct",
+            "target_input": "BASE_COLOR_MIX",
+            "method": "ao_multiply"
+          }
+        },
+
+        "height": {
+          "suffixes": ["_H", "_Height", "_Displacement", "_Disp"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "direct",
+            "target_input": "SKIP",
+            "_note": "Height maps have no direct Principled BSDF input; imported for completeness."
+          }
+        },
+
+        "id_mask": {
+          "suffixes": ["_ID", "_Mask_ID", "_MaskID"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "direct",
+            "target_input": "SKIP",
+            "_note": "ID/tint mask maps are used by UE master materials for region coloring; no direct BSDF target."
+          }
+        },
+
+        "specular": {
+          "suffixes": ["_S", "_Specular", "_Spec"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Specular IOR Level"
+          }
+        },
+
+        "rgb_masks": {
+          "suffixes": [
+            "_Masks",
+            "_MASKS",
+            "_masks",
+            "_RGB_Masks",
+            "_MASK",
+            "_Mask"
+          ],
+          "param_names": ["RGBMask", "RGB Mask"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "rgb_mask_tint",
+            "_note": "RGB channels are masks for color tinting. Each channel (R/G/B) is used as a factor to mix a corresponding ColorTint (RColorTint/GColorTint/BColorTint from props) onto the base color. Tints are read from VectorParameterValues in the material props file.",
+            "channels": {
+              "R": { "tint_param": "RColorTint", "label": "R Mask Tint" },
+              "G": { "tint_param": "GColorTint", "label": "G Mask Tint" },
+              "B": { "tint_param": "BColorTint", "label": "B Mask Tint" }
+            }
+          }
+        },
+
+        "alb": {
+          "suffixes": ["_Alb"],
+          "colorspace": "sRGB",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Base Color"
+          }
+        },
+
+        "refl": {
+          "suffixes": ["_Refl", "_refl", "_relf", "_RelfMasks", "_mrea", "_MREA"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Roughness"
+          }
+        },
+
+        "nor": {
+          "suffixes": ["_Nor"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "normal_map",
+            "target_input": "Normal"
+          }
+        },
+
+        "ao_masks": {
+          "suffixes": ["_AOMasks"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "ao_mask",
+            "target_input": "Base Color",
+            "_note": "Factor of a Mix (Color) node. A=base color texture, B=white (default). Output feeds BSDF Base Color."
+          }
+        },
+
+        "packed_nrm": {
+          "suffixes": [],
+          "param_names": ["NormalRoughnessMetallic", "NRM"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "split_channels",
+            "_note": "Packed Normal XY + Roughness (+ Metallic in Alpha). Normal reconstruction from separate channels not yet implemented.",
+            "channels": {
+              "R": { "target_input": "NORMAL_X", "label": "Normal X" },
+              "G": { "target_input": "NORMAL_Y", "label": "Normal Y" },
+              "B": { "target_input": "Roughness", "label": "Roughness" }
+            }
+          }
+        }
+      }
+    },
+
+    "simple_diffuse": {
+      "description": "Simple diffuse-only material. No PBR maps.",
+      "priority_order": ["base_color", "normal"],
+
+      "texture_slots": {
+        "base_color": {
+          "suffixes": [
+            "_C",
+            "_Diffuse",
+            "_D",
+            "_BaseColor",
+            "_BC",
+            "_Albedo",
+            "_T"
+          ],
+          "colorspace": "sRGB",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Base Color"
+          }
+        },
+        "normal": {
+          "suffixes": ["_N", "_Normal", "_NRM"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "normal_map",
+            "target_input": "Normal"
+          }
+        }
+      }
+    },
+
+    "nrm_packed": {
+      "description": "For assets where _NRM is a packed Normal+Roughness+Metallic map (RG=Normal, B=Roughness, A=Metallic).",
+      "priority_order": ["base_color", "nrm_packed"],
+
+      "texture_slots": {
+        "base_color": {
+          "suffixes": ["_C", "_Diffuse", "_D"],
+          "colorspace": "sRGB",
+          "wiring": {
+            "type": "direct",
+            "target_input": "Base Color"
+          }
+        },
+        "nrm_packed": {
+          "suffixes": ["_NRM"],
+          "colorspace": "Non-Color",
+          "wiring": {
+            "type": "split_channels",
+            "channels": {
+              "R": { "target_input": "NORMAL_X", "label": "Normal X" },
+              "G": { "target_input": "NORMAL_Y", "label": "Normal Y" },
+              "B": { "target_input": "Roughness", "label": "Roughness" }
+            },
+            "_note": "Alpha channel used for Metallic if present"
+          }
+        }
+      }
+    }
+  },
+
+  "material_overrides": {
+    "_example_M_SomeMaterialName": {
+      "_comment": "Remove the leading underscore from the key to activate this override. The key must match the material name exactly as it appears in Blender after PSK import.",
+      "preset": "default_pbr",
+      "force_textures": {
+        "base_color": "SomeSpecificTextureName_C",
+        "normal": "SomeSpecificTextureName_N"
+      }
+    },
+    "_example_M_GlassMaterial": {
+      "_comment": "Example: override for a glass material that should use a different preset.",
+      "preset": "simple_diffuse",
+      "bsdf_overrides": {
+        "Transmission Weight": 0.95,
+        "Roughness": 0.05,
+        "IOR": 1.45
+      }
+    }
+  },
+
+  "wiring_types_reference": {
+    "_comment": "This section documents the available wiring types. It is NOT processed by the app — it's here for your reference when editing.",
+    "direct": "Connects an Image Texture node directly to a Principled BSDF input. Specify 'target_input' (e.g., 'Base Color', 'Roughness', 'Metallic', 'Emission Color', 'Alpha').",
+    "split_channels": "Adds a Separate RGB node after the Image Texture. Each channel (R/G/B) can target a different BSDF input. Use 'method': 'ao_multiply' on a channel to multiply it with the Base Color via a MixRGB node instead of connecting directly.",
+    "normal_map": "Adds a Normal Map node between the Image Texture and the BSDF Normal input. Blender auto-handles tangent space.",
+    "special_targets": {
+      "BASE_COLOR_MIX": "Indicates this channel should be mixed (multiplied) with the Base Color texture. Used for AO channels in ORM/RMA maps.",
+      "NORMAL_X": "X component of a reconstructed normal (for packed NRM maps).",
+      "NORMAL_Y": "Y component of a reconstructed normal (for packed NRM maps).",
+      "SKIP": "Imports the texture node but does not wire it (for height maps, ID masks, etc)."
+    },
+    "rgb_mask_tint": "Separates R/G/B channels and uses each as a factor to mix a color tint (from VectorParameterValues) onto the base color. Creates a chain of MixColor nodes. Tint colors are read from the material's .props.txt (RColorTint, GColorTint, BColorTint)."
+  }
+}

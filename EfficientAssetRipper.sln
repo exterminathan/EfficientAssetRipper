@@ -1,0 +1,29 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "cue4parse_cli", "cue4parse_cli", "{E3703EB6-23F8-AB1D-A700-484B28EAAF59}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CUE4ParseCLI", "cue4parse_cli\CUE4ParseCLI.csproj", "{3CA13765-79C4-17DF-EA0D-DBED752E6C02}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3CA13765-79C4-17DF-EA0D-DBED752E6C02}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3CA13765-79C4-17DF-EA0D-DBED752E6C02}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3CA13765-79C4-17DF-EA0D-DBED752E6C02}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3CA13765-79C4-17DF-EA0D-DBED752E6C02}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{3CA13765-79C4-17DF-EA0D-DBED752E6C02} = {E3703EB6-23F8-AB1D-A700-484B28EAAF59}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {DBC62219-6F36-4AE8-A68D-35A326B5D550}
+	EndGlobalSection
+EndGlobal
