@@ -259,7 +259,8 @@ class _NewProfileDialog(QDialog):
         name = text.strip()
         if not name:
             return
-        base = Path(__file__).resolve().parent.parent
+        from _base import base_dir
+        base = base_dir()
         if not self._blend_dir_edit.text().strip() or self._blend_dir_edit.text().startswith(str(base / "outputs")):
             self._blend_dir_edit.setText(str(base / "outputs" / name))
         if not self._unpack_dir_edit.text().strip() or self._unpack_dir_edit.text().startswith(str(base / "outputs")):

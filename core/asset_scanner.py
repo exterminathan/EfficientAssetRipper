@@ -506,7 +506,9 @@ class AssetScanner:
 # ---------------------------------------------------------------------------
 
 _CACHE_VERSION = 1
-_DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
+from _base import base_dir as _base_dir
+
+_DEFAULT_CACHE_DIR = _base_dir() / "cache"
 
 
 def _get_cache_path(game_folder: str) -> Path:

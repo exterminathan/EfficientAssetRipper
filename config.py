@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 from PySide6.QtCore import QSettings
+from _base import base_dir
 
 _DEFAULTS = {
     "game_folder": "",
@@ -11,7 +12,7 @@ _DEFAULTS = {
     "everything_dll": "",
     "psk_addon_name": "bl_ext.blender_org.io_scene_psk_psa",
     "timeout_seconds": 120,
-    "presets_path": str(Path(__file__).parent / "data" / "texture_presets.json"),
+    "presets_path": str(base_dir() / "data" / "texture_presets.json"),
     "cue4parse_cli": "",
     "unpack_output_dir": "",
     "aes_keys": "[]",
@@ -45,7 +46,7 @@ def set(key: str, value) -> None:  # noqa: A001
 
 def get_presets_path() -> Path:
     p = get("presets_path")
-    return Path(p) if p else Path(__file__).parent / "data" / "texture_presets.json"
+    return Path(p) if p else base_dir() / "data" / "texture_presets.json"
 
 
 def load_presets() -> dict:

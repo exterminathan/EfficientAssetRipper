@@ -22,8 +22,10 @@ log = logging.getLogger(__name__)
 # Font system
 # ---------------------------------------------------------------------------
 
+from _base import base_dir
+
 # Directory where users drop .ttf / .otf font files
-FONTS_DIR = Path(__file__).resolve().parent.parent / "fonts"
+FONTS_DIR = base_dir() / "fonts"
 
 # ── Change these two values to use a custom font ─────────────────────
 # Set CUSTOM_FONT_FAMILY to the family name that your .ttf/.otf file

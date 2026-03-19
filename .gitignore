@@ -18,6 +18,11 @@ cache/
 outputs/
 logs/
 
+# ── Build artifacts (PyInstaller) ─────────────────────────────────────────────
+dist/
+build/
+*.spec
+
 # ── OS noise ──────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

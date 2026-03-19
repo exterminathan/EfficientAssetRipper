@@ -7,9 +7,11 @@ import logging
 import re
 from pathlib import Path
 
+from _base import base_dir
+
 log = logging.getLogger(__name__)
 
-_PROFILES_DIR = Path(__file__).resolve().parent.parent / "profiles"
+_PROFILES_DIR = base_dir() / "profiles"
 
 # Characters not allowed in profile (file) names on Windows
 _INVALID_CHARS = re.compile(r'[\\/:*?"<>|]')

@@ -30,8 +30,10 @@ import config
 
 log = logging.getLogger(__name__)
 
+from _base import base_dir
+
 COMBINE_SCRIPT = str(
-    Path(__file__).resolve().parent.parent / "blender" / "combine_blends.py"
+    base_dir() / "blender" / "combine_blends.py"
 )
 
 

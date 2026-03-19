@@ -14,10 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from _base import base_dir
+
 log = logging.getLogger(__name__)
 
 BLENDER_SCRIPT = str(
-    Path(__file__).resolve().parent.parent / "blender" / "process_asset.py"
+    base_dir() / "blender" / "process_asset.py"
 )
 
 

@@ -1,0 +1,110 @@
+@echo off
+setlocal enabledelayedexpansion
+
+echo ====================================================
+echo  EfficientAssetRipper — Build Pipeline
+echo ====================================================
+echo.
+
+set "PROJECT_DIR=%~dp0"
+set "DIST_DIR=%PROJECT_DIR%dist\EfficientAssetRipper"
+set "BUILD_TEMP=%TEMP%\EAR_build"
+
+:: ── Check Python ─────────────────────────────────────────────────────────────
+where py >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Python not found. Install from https://python.org
+    pause
+    exit /b 1
+)
+
+:: ── Check pip packages ───────────────────────────────────────────────────────
+echo [0/5] Checking dependencies...
+py -m pip show pyinstaller >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo      Installing PyInstaller...
+    py -m pip install pyinstaller
+)
+py -m pip show pillow >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo      Installing Pillow...
+    py -m pip install pillow
+)
+echo.
+
+:: ── Step 1: Build Python EXE ─────────────────────────────────────────────────
+echo [1/5] Building Python application with PyInstaller...
+echo.
+
+cd /d "%PROJECT_DIR%"
+
+py -m PyInstaller --noconfirm --clean --onedir --windowed --name EfficientAssetRipper --distpath "%BUILD_TEMP%\dist" --workpath "%BUILD_TEMP%\work" --specpath "%BUILD_TEMP%" --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtMultimedia --hidden-import PIL main.py
+
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: PyInstaller build failed.
+    pause
+    exit /b 1
+)
+echo.
+
+:: ── Step 2: Copy output to dist/ ─────────────────────────────────────────────
+echo [2/5] Copying build output to dist\...
+if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
+xcopy /Y /E /I /Q "%BUILD_TEMP%\dist\EfficientAssetRipper" "%DIST_DIR%" >nul
+
+:: Copy data files alongside the exe (not inside _internal)
+xcopy /Y /E /I /Q "%PROJECT_DIR%data" "%DIST_DIR%\data" >nul
+xcopy /Y /E /I /Q "%PROJECT_DIR%fonts" "%DIST_DIR%\fonts" >nul
+xcopy /Y /E /I /Q "%PROJECT_DIR%blender" "%DIST_DIR%\blender" >nul
+echo.
+
+:: ── Step 3: Ensure runtime directories exist ──────────────────────────────────
+echo [3/5] Creating runtime directories...
+if not exist "%DIST_DIR%\profiles" mkdir "%DIST_DIR%\profiles"
+if not exist "%DIST_DIR%\cache" mkdir "%DIST_DIR%\cache"
+if not exist "%DIST_DIR%\outputs" mkdir "%DIST_DIR%\outputs"
+if not exist "%DIST_DIR%\logs" mkdir "%DIST_DIR%\logs"
+echo.
+
+:: ── Step 4: Build CUE4Parse CLI (optional) ───────────────────────────────────
+where dotnet >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo [4/5] SKIP — .NET SDK not found ^(CUE4ParseCLI not built^)
+    echo      Install .NET 8.0 SDK to include CUE4ParseCLI in the build.
+    echo.
+    goto :CREATE_ZIP
+)
+
+echo [4/5] Building CUE4ParseCLI...
+set "CLI_PUB=%TEMP%\CUE4ParseCLI_publish"
+set "CLI_OBJ=%TEMP%\CUE4ParseCLI_obj"
+set "CLI_BIN=%TEMP%\CUE4ParseCLI_bin"
+
+dotnet publish "%PROJECT_DIR%cue4parse_cli\CUE4ParseCLI.csproj" -c Release -r win-x64 --self-contained false -o "%CLI_PUB%" -p:BaseIntermediateOutputPath="%CLI_OBJ%\" -p:BaseOutputPath="%CLI_BIN%\"
+if %ERRORLEVEL% neq 0 (
+    echo WARNING: CUE4ParseCLI build failed. Skipping.
+    echo.
+    goto :CREATE_ZIP
+)
+
+if not exist "%DIST_DIR%\cue4parse_cli\bin\publish" mkdir "%DIST_DIR%\cue4parse_cli\bin\publish"
+xcopy /Y /E /Q "%CLI_PUB%\*" "%DIST_DIR%\cue4parse_cli\bin\publish\" >nul
+echo.
+
+:: ── Step 5: Create ZIP ────────────────────────────────────────────────────────
+:CREATE_ZIP
+echo [5/5] Creating distribution ZIP...
+cd /d "%PROJECT_DIR%dist"
+if exist "EfficientAssetRipper-win-x64.zip" del "EfficientAssetRipper-win-x64.zip"
+powershell -NoProfile -Command "Compress-Archive -Path 'EfficientAssetRipper' -DestinationPath 'EfficientAssetRipper-win-x64.zip' -Force"
+echo.
+
+:: ── Done ─────────────────────────────────────────────────────────────────────
+echo ====================================================
+echo  Build complete!
+echo ====================================================
+echo.
+echo  EXE:  %DIST_DIR%\EfficientAssetRipper.exe
+echo  ZIP:  %PROJECT_DIR%dist\EfficientAssetRipper-win-x64.zip
+echo.
+pause
