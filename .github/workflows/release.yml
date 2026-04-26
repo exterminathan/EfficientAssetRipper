@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write   # needed by softprops/action-gh-release
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Python dependencies
+        run: |
+          py -m pip install --upgrade pip
+          py -m pip install -r requirements.txt -r requirements-dev.txt
+          py -m pip install pyinstaller
+
+      - name: Run fast test tiers
+        run: py -m pytest -q -m "not slow and not requires_blender and not requires_everything and not requires_dotnet_cli" --maxfail=1
+
+      - name: Run build pipeline
+        shell: cmd
+        run: build.bat
+
+      - name: Verify ZIP artifact
+        shell: pwsh
+        run: |
+          $zip = "dist\EfficientAssetRipper-win-x64.zip"
+          if (-not (Test-Path $zip)) { throw "ZIP not found at $zip" }
+          if ((Get-Item $zip).Length -lt 1MB) { throw "ZIP suspiciously small" }
+
+      - name: Extract changelog block for this tag
+        id: changelog
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $text = Get-Content -Raw -Encoding UTF8 CHANGELOG.md
+          # Match "## [<version>]" up to the next "## [" header (or EOF).
+          $pattern = "(?ms)^##\s+\[" + [regex]::Escape($version) + "\][^\n]*\n(.*?)(?=^##\s+\[|\z)"
+          $m = [regex]::Match($text, $pattern)
+          if (-not $m.Success) {
+            Write-Warning "No CHANGELOG entry found for $version — using fallback body"
+            $body = "Release $tag. See [CHANGELOG.md](CHANGELOG.md) for details."
+          } else {
+            $body = $m.Groups[1].Value.Trim()
+          }
+          # Write to a file because multiline outputs over $env:GITHUB_OUTPUT
+          # need the EOF-delimiter dance and this is simpler.
+          $body | Out-File -FilePath release_body.md -Encoding UTF8
+          Write-Host "Release body written to release_body.md ($([System.Text.Encoding]::UTF8.GetByteCount($body)) bytes)"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release_body.md
+          files: dist/EfficientAssetRipper-win-x64.zip
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

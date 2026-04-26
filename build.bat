@@ -10,11 +10,18 @@ set "PROJECT_DIR=%~dp0"
 set "DIST_DIR=%PROJECT_DIR%dist\EfficientAssetRipper"
 set "BUILD_TEMP=%TEMP%\EAR_build"
 
+:: Skip interactive `pause` calls when running unattended (CI, scripts).
+:: Set the CI env var (GitHub Actions does this automatically) or
+:: NO_PAUSE=1 to suppress them.
+set "PAUSE_CMD=pause"
+if defined CI set "PAUSE_CMD=rem"
+if defined NO_PAUSE set "PAUSE_CMD=rem"
+
 :: ── Check Python ─────────────────────────────────────────────────────────────
 where py >nul 2>nul
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Python not found. Install from https://python.org
-    pause
+    %PAUSE_CMD%
     exit /b 1
 )
 
@@ -43,7 +50,7 @@ py -m pytest -q -m "not slow and not requires_blender and not requires_everythin
 if %ERRORLEVEL% neq 0 (
     echo.
     echo ERROR: Pre-build tests failed. Aborting build.
-    pause
+    %PAUSE_CMD%
     exit /b 1
 )
 echo.
@@ -76,7 +83,7 @@ py -m PyInstaller --noconfirm --clean --onedir --windowed --name EfficientAssetR
 
 if %ERRORLEVEL% neq 0 (
     echo ERROR: PyInstaller build failed.
-    pause
+    %PAUSE_CMD%
     exit /b 1
 )
 echo.
@@ -141,4 +148,4 @@ echo.
 echo  EXE:  %DIST_DIR%\EfficientAssetRipper.exe
 echo  ZIP:  %PROJECT_DIR%dist\EfficientAssetRipper-win-x64.zip
 echo.
-pause
+%PAUSE_CMD%

@@ -1,0 +1,61 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Python dependencies
+        run: |
+          py -m pip install --upgrade pip
+          py -m pip install -r requirements.txt -r requirements-dev.txt
+          py -m pip install pyinstaller
+
+      - name: Run fast test tiers
+        # Same exclusion set as build.bat step [0b/5]
+        run: py -m pytest -q -m "not slow and not requires_blender and not requires_everything and not requires_dotnet_cli" --maxfail=1
+
+      - name: Run build pipeline
+        # build.bat re-runs the test gate (cheap, mirrors local behaviour) and
+        # then builds the EXE + ZIP via PyInstaller. The CI env var (set by
+        # GitHub Actions) suppresses interactive `pause` calls.
+        shell: cmd
+        run: build.bat
+
+      - name: Verify ZIP artifact exists and is non-empty
+        shell: pwsh
+        run: |
+          $zip = "dist\EfficientAssetRipper-win-x64.zip"
+          if (-not (Test-Path $zip)) { throw "ZIP not found at $zip" }
+          $size = (Get-Item $zip).Length
+          if ($size -lt 1MB) { throw "ZIP is suspiciously small: $size bytes" }
+          Write-Host "OK: $zip is $($size / 1MB) MB"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EAR-build-${{ github.sha }}
+          path: dist/EfficientAssetRipper-win-x64.zip
+          if-no-files-found: error
+          retention-days: 14

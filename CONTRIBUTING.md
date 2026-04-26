@@ -92,3 +92,22 @@ Use the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md). The
 project-specific debug info that's most useful: Blender version, .NET
 version, the affected profile JSON (with AES keys redacted), and the most
 recent log file from `logs/`.
+
+## Cutting a release (maintainers)
+
+CI watches for tag pushes matching `v*.*.*`. To ship a new version:
+
+1. Bump `__version__` in [_version.py](_version.py) and add a matching
+   `## [x.y.z] - YYYY-MM-DD` block to [CHANGELOG.md](CHANGELOG.md).
+2. Run `py -m pytest` locally — the version test guards against
+   CHANGELOG/`_version.py` drift.
+3. Commit, then tag and push:
+   ```bash
+   git tag v0.5.1 -m "v0.5.1 — bug fixes"
+   git push origin main --tags
+   ```
+4. The [release workflow](.github/workflows/release.yml) builds the ZIP,
+   pulls the changelog block for the tag's version, and publishes a
+   GitHub Release with the artifact attached. Pre-release tags (anything
+   containing a `-`, e.g. `v0.6.0-rc1`) are marked as pre-release
+   automatically.
