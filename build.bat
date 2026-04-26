@@ -65,7 +65,14 @@ if %ERRORLEVEL% neq 0 (
     set "VERSION_ARG=--version-file %VERSION_INFO%"
 )
 
-py -m PyInstaller --noconfirm --clean --onedir --windowed --name EfficientAssetRipper --distpath "%BUILD_TEMP%\dist" --workpath "%BUILD_TEMP%\work" --specpath "%BUILD_TEMP%" %VERSION_ARG% --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtMultimedia --hidden-import PIL main.py
+set "ICON_PATH=%PROJECT_DIR%assets\icon.ico"
+if exist "%ICON_PATH%" (
+    set "ICON_ARG=--icon "%ICON_PATH%""
+) else (
+    set "ICON_ARG="
+)
+
+py -m PyInstaller --noconfirm --clean --onedir --windowed --name EfficientAssetRipper --distpath "%BUILD_TEMP%\dist" --workpath "%BUILD_TEMP%\work" --specpath "%BUILD_TEMP%" %VERSION_ARG% %ICON_ARG% --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtMultimedia --hidden-import PIL main.py
 
 if %ERRORLEVEL% neq 0 (
     echo ERROR: PyInstaller build failed.

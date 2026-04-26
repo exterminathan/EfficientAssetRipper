@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -157,6 +157,12 @@ class MainWindow(QMainWindow):
         self._maybe_run_setup_wizard()
         self._load_initial_profile()
 
+        # Kick off the auto-update check 2s after launch so it never delays
+        # the splash. UpdateChecker fails silently on any error.
+        self._update_info = None
+        self._update_checker = None
+        QTimer.singleShot(2000, self._start_update_check)
+
     def _maybe_run_setup_wizard(self):
         """Show the first-run wizard if it hasn't been completed yet."""
         from gui.setup_wizard import SetupWizard, should_show_setup
@@ -164,6 +170,21 @@ class MainWindow(QMainWindow):
             return
         wizard = SetupWizard(self)
         wizard.exec()
+
+    def _start_update_check(self):
+        from core.update_check import UpdateChecker
+        self._update_checker = UpdateChecker(parent=self)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.start()
+
+    @Slot(object)
+    def _on_update_available(self, info):
+        self._update_info = info
+        self._statusbar.showMessage(
+            f"Update available: {info.latest} (you have v{info.current}) — Help → About",
+            10_000,
+        )
+        log.info("Update available: %s (current %s)", info.latest, info.current)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -351,12 +372,19 @@ class MainWindow(QMainWindow):
                 self._tab_actions[(id(tabs), name)] = (action, tabs, widget, i)
 
     def _show_about(self):
+        update_html = ""
+        if self._update_info and self._update_info.is_newer:
+            update_html = (
+                f"<p><b>Update available:</b> {self._update_info.latest} — "
+                f'<a href="{self._update_info.release_url}">view release</a></p>'
+            )
         QMessageBox.about(
             self,
             "About EfficientAssetRipper",
             f"<h3>EfficientAssetRipper v{__version__}</h3>"
             "<p>UE5 → Blender asset assembler.</p>"
             "<p>Released under the MIT License.</p>"
+            f"{update_html}"
             '<p><a href="https://github.com/exterminathan/EfficientAssetRipper">'
             "github.com/exterminathan/EfficientAssetRipper</a></p>",
         )
