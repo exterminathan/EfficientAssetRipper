@@ -54,7 +54,18 @@ echo.
 
 cd /d "%PROJECT_DIR%"
 
-py -m PyInstaller --noconfirm --clean --onedir --windowed --name EfficientAssetRipper --distpath "%BUILD_TEMP%\dist" --workpath "%BUILD_TEMP%\work" --specpath "%BUILD_TEMP%" --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtMultimedia --hidden-import PIL main.py
+:: Generate VERSIONINFO from _version.py so the EXE file properties match the UI.
+set "VERSION_INFO=%BUILD_TEMP%\version_info.txt"
+if not exist "%BUILD_TEMP%" mkdir "%BUILD_TEMP%"
+py "%PROJECT_DIR%tools\make_version_info.py" "%VERSION_INFO%"
+if %ERRORLEVEL% neq 0 (
+    echo WARNING: Failed to generate version_info.txt — building without it.
+    set "VERSION_ARG="
+) else (
+    set "VERSION_ARG=--version-file %VERSION_INFO%"
+)
+
+py -m PyInstaller --noconfirm --clean --onedir --windowed --name EfficientAssetRipper --distpath "%BUILD_TEMP%\dist" --workpath "%BUILD_TEMP%\work" --specpath "%BUILD_TEMP%" %VERSION_ARG% --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtMultimedia --hidden-import PIL main.py
 
 if %ERRORLEVEL% neq 0 (
     echo ERROR: PyInstaller build failed.

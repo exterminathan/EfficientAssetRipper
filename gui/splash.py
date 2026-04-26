@@ -31,6 +31,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QFont,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -40,6 +41,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
+from _version import __version__
 from gui.color_schemes import get_scheme, DEFAULT_SCHEME
 
 
@@ -237,6 +239,20 @@ class SplashScreen(QWidget):
                 glow_pen = QPen(glow, max(4.0, base_gem_size * 0.18 * gem_scale))
                 p.setPen(glow_pen)
                 p.drawEllipse(QPointF(logo_x, logo_y), circle_radius * 1.08, circle_radius * 1.08)
+
+        # ── Version footer (visible until iris starts) ───────────────
+        if t < _PHASE_ZOOM_END:
+            footer = QColor(c["text_muted"]) if "text_muted" in c else QColor(c.get("text", "#888888"))
+            footer.setAlpha(int(_lerp(0, 200, min(t / _PHASE_RISE_END, 1.0))))
+            font = QFont()
+            font.setPointSizeF(max(8.0, min(W, H) * 0.012))
+            p.setFont(font)
+            p.setPen(QPen(footer))
+            p.drawText(
+                QRectF(0, H - max(28.0, H * 0.06), W, 24.0),
+                int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
+                f"EfficientAssetRipper v{__version__}",
+            )
 
         # ── Phase 4: Iris rectangle open ─────────────────────────────
         if t >= _PHASE_ZOOM_END:

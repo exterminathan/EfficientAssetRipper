@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 import config
+from _version import __version__
 from core.asset_scanner import (
     AssetEntry,
     AssetScanner,
@@ -139,7 +140,7 @@ class _PickerResolveWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("EfficientAssetRipper")
+        self.setWindowTitle(f"EfficientAssetRipper v{__version__}")
         self.setMinimumSize(1200, 700)
 
         self._job_manager: JobManager | None = None
@@ -320,6 +321,9 @@ class MainWindow(QMainWindow):
             lambda: self._right_tabs.setCurrentWidget(self._combiner),
         )
 
+        help_menu = menubar.addMenu("Help")
+        help_menu.addAction("About...", self._show_about)
+
         # ── Window menu — toggle visibility of each tab ───────────────
         window_menu = menubar.addMenu("Window")
         self._tab_actions = {}
@@ -336,6 +340,17 @@ class MainWindow(QMainWindow):
                     lambda checked, t=tabs, w=widget, n=name: self._toggle_tab(t, w, n, checked)
                 )
                 self._tab_actions[(id(tabs), name)] = (action, tabs, widget, i)
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "About EfficientAssetRipper",
+            f"<h3>EfficientAssetRipper v{__version__}</h3>"
+            "<p>UE5 → Blender asset assembler.</p>"
+            "<p>Released under the MIT License.</p>"
+            '<p><a href="https://github.com/exterminathan/EfficientAssetRipper">'
+            "github.com/exterminathan/EfficientAssetRipper</a></p>",
+        )
 
     def _toggle_tab(self, tab_widget: QTabWidget, widget: QWidget, name: str, visible: bool):
         """Show or hide a tab in a QTabWidget."""
@@ -590,7 +605,7 @@ class MainWindow(QMainWindow):
         # Load PSK picker state (after cache so processed lists merge correctly)
         self._psk_picker.load_from_profile(data)
 
-        self.setWindowTitle(f"EfficientAssetRipper — {name}")
+        self.setWindowTitle(f"EfficientAssetRipper v{__version__} — {name}")
 
     def _switch_profile(self, name: str):
         """Save current profile, then load the new one."""
@@ -614,7 +629,7 @@ class MainWindow(QMainWindow):
         if self._current_profile_name == old:
             self._current_profile_name = new
             config.set("active_profile", new)
-            self.setWindowTitle(f"EfficientAssetRipper — {new}")
+            self.setWindowTitle(f"EfficientAssetRipper v{__version__} — {new}")
         self._log.append(f"Renamed profile: {old} → {new}", "info")
 
     # ------------------------------------------------------------------
