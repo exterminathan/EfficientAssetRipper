@@ -6,7 +6,7 @@
     Git tracks the source code.  The folders below are gitignored because they
     contain machine-specific paths and potentially sensitive AES keys, or are
     just too large for a repo.  Use this script to keep them in sync with a
-    second location (Google Drive, NAS, USB, another machine, etc.).
+    second location (cloud drive, NAS, USB, another machine, etc.).
 
     Folders synced
     --------------
@@ -15,11 +15,20 @@
     outputs/    Generated .blend files
     logs/       Runtime batch logs
 
+    The backup destination is read from the EAR_SYNC_PATH environment variable.
+    Set it once per shell, e.g.:
+
+        $env:EAR_SYNC_PATH = "D:\Backups\EAR"
+
+    or persist it for the user:
+
+        [Environment]::SetEnvironmentVariable("EAR_SYNC_PATH", "D:\Backups\EAR", "User")
+
 .PARAMETER Backup
-    Copy local  →  $ArchivePath   (overwrites older files, mirrors deletions)
+    Copy local  →  $env:EAR_SYNC_PATH   (overwrites older files, mirrors deletions)
 
 .PARAMETER Restore
-    Copy $ArchivePath  →  local   (overwrites older files, mirrors deletions)
+    Copy $env:EAR_SYNC_PATH  →  local   (overwrites older files, mirrors deletions)
 
 .PARAMETER Folders
     Comma-separated list of folders to include.
@@ -27,6 +36,7 @@
     Pass "all" to include outputs and logs as well.
 
 .EXAMPLE
+    $env:EAR_SYNC_PATH = "D:\Backups\EAR"
     .\sync.ps1 -Backup
     .\sync.ps1 -Restore
     .\sync.ps1 -Backup  -Folders all
@@ -38,10 +48,22 @@ param(
     [string]$Folders = "profiles,cache"
 )
 
-# ── CONFIGURE THIS ────────────────────────────────────────────────────────────
-# Destination for -Backup / source for -Restore.
-# Default points at the Google Drive project folder; change it to suit.
-$ArchivePath = "G:\My Drive\Personal Storage\Project Contents\EfficientAssetRipper\_sync"
+# ── Backup location ──────────────────────────────────────────────────────────
+# Read from the EAR_SYNC_PATH environment variable so no personal path is
+# baked into the committed script.
+$ArchivePath = $env:EAR_SYNC_PATH
+if ([string]::IsNullOrWhiteSpace($ArchivePath)) {
+    Write-Host ""
+    Write-Host "ERROR: EAR_SYNC_PATH environment variable is not set." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Set it to the folder you want to back up to, e.g.:"
+    Write-Host '    $env:EAR_SYNC_PATH = "D:\Backups\EAR"'
+    Write-Host ""
+    Write-Host "To make it persistent for the current Windows user:"
+    Write-Host '    [Environment]::SetEnvironmentVariable("EAR_SYNC_PATH", "D:\Backups\EAR", "User")'
+    Write-Host ""
+    exit 1
+}
 # ─────────────────────────────────────────────────────────────────────────────
 
 $ProjectPath = $PSScriptRoot

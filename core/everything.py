@@ -129,7 +129,7 @@ class EverythingSDK:
 
         The query uses Everything's search syntax, e.g.:
             "XWing_01_Droid_C.tga"
-            "ext:psk;pskx path:G:\\GameFiles"
+            "ext:psk;pskx path:D:\\Games"
         """
         self._dll.Everything_SetSearchW(query)
         self._dll.Everything_SetRequestFlags(
