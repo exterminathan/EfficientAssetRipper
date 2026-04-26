@@ -10,6 +10,9 @@ pytestmark = [pytest.mark.qt, pytest.mark.gui]
 @pytest.fixture
 def main_window(qtbot, mock_qsettings, tmp_profiles_dir):
     """Construct MainWindow with isolated settings + profiles. Not shown."""
+    # Mark first-run setup as complete so the wizard doesn't fire during tests.
+    import config
+    config.set("setup_complete", "1")
     from gui.main_window import MainWindow
     win = MainWindow()
     qtbot.addWidget(win)

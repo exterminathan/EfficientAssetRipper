@@ -22,6 +22,7 @@ _DEFAULTS = {
     "active_profile": "Default",
     "color_scheme": "Dusk",
     "custom_schemes": "{}",
+    "setup_complete": "",
 }
 
 _qs = QSettings("EfficientAssetRipper", "EfficientAssetRipper")

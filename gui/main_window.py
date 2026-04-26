@@ -154,7 +154,16 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
+        self._maybe_run_setup_wizard()
         self._load_initial_profile()
+
+    def _maybe_run_setup_wizard(self):
+        """Show the first-run wizard if it hasn't been completed yet."""
+        from gui.setup_wizard import SetupWizard, should_show_setup
+        if not should_show_setup():
+            return
+        wizard = SetupWizard(self)
+        wizard.exec()
 
     # ------------------------------------------------------------------
     # UI construction

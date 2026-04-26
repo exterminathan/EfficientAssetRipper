@@ -28,6 +28,7 @@ REQUIRED_KEYS = {
     "active_profile",
     "color_scheme",
     "custom_schemes",
+    "setup_complete",
 }
 
 
