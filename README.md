@@ -1,6 +1,17 @@
 # EfficientAssetRipper
 
-A desktop application for extracting Unreal Engine game assets and automatically assembling them in Blender with full material/texture wiring.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/exterminathan/EfficientAssetRipper?include_prereleases&sort=semver)](https://github.com/exterminathan/EfficientAssetRipper/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078d4)](#download)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
+[![Built with PySide6 + .NET 8](https://img.shields.io/badge/built%20with-PySide6%20%2B%20.NET%208-512bd4)](#dependencies)
+
+> **From `.pak` to `.blend` in three clicks.** A Windows desktop app that
+> turns Unreal Engine 5 game files into ready-to-use Blender scenes with
+> fully wired PBR materials.
+
+<!-- Demo GIF — record locally with ScreenToGif/LICEcap, drop in docs/demo.gif -->
+![EfficientAssetRipper demo](docs/demo.gif)
 
 **Scan → Resolve → Process → Done.** Point it at a game folder, and EfficientAssetRipper finds meshes, resolves their materials and textures, then batch-processes everything in Blender — importing PSK/PSKX meshes, wiring PBR shader nodes, and saving ready-to-use `.blend` files.
 
@@ -34,8 +45,22 @@ this software with no warranty.
 
 ## Screenshots
 
-<!-- Add screenshots here -->
-<!-- ![Main Window](docs/screenshots/main.png) -->
+![Main window](docs/screenshots/main.png)
+
+---
+
+## Verified Compatible With
+
+EfficientAssetRipper has been tested end-to-end against the following UE5
+titles:
+
+- **Star Wars Jedi: Survivor**
+- **Rocket League**
+- **Satisfactory**
+
+Other UE5 (and most UE4) games **should** work as well — the pipeline is
+generic. If your game doesn't, please [open an issue](../../issues/new) with
+the game name and a sample `.props.txt` so the resolver rules can be tuned.
 
 ---
 
@@ -74,7 +99,7 @@ Download the latest release from the [Releases](../../releases) page:
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/YOUR_USERNAME/EfficientAssetRipper.git
+   git clone https://github.com/exterminathan/EfficientAssetRipper.git
    cd EfficientAssetRipper
    ```
 
@@ -383,6 +408,40 @@ Key settings:
 - [Everything](https://www.voidtools.com/) — Windows file search (must be running)
 - [.NET 8.0 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) — Required for CUE4ParseCLI
 - [vgmstream](https://vgmstream.org/) — WEM audio conversion (auto-downloaded by CUE4ParseCLI)
+
+---
+
+## Acknowledgments
+
+EfficientAssetRipper stands on the shoulders of these excellent open-source
+projects — please support them:
+
+- **[CUE4Parse](https://github.com/FabianFG/CUE4Parse)** by FabianFG — the .NET
+  library that does all of the heavy lifting for UE archive parsing,
+  decryption, and asset export. Without it, none of the unpacker pipeline
+  would exist.
+- **[Everything](https://www.voidtools.com/)** by voidtools — the instant file
+  index that powers the asset scanner.
+- **[Blender](https://www.blender.org/)** — the headless renderer that imports
+  meshes and assembles material graphs.
+- **[io_scene_psk_psa](https://github.com/DarklightGames/io_scene_psk_psa)** —
+  the bundled Blender extension that imports PSK/PSKX/PSA files.
+- **[vgmstream](https://vgmstream.org/)** — game audio decoding for WWise WEM
+  conversion.
+- **[Oodle](http://www.radgametools.com/oodlecompressors.htm)** by Epic Games /
+  RAD Game Tools — the compression codec used by most modern UE games
+  (auto-downloaded by CUE4Parse on first use).
+
+---
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+dev environment setup, the project's code map, and the rules around
+rebuilding the CUE4Parse CLI after editing C# code.
+
+Bug reports and feature ideas: please use the
+[issue templates](.github/ISSUE_TEMPLATE/).
 
 ---
 
