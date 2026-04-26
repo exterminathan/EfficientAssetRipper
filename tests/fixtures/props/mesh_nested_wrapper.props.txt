@@ -1,0 +1,13 @@
+StaticMaterials[2] =
+{
+   StaticMaterials[0] =
+   {
+      MaterialSlotName = WrapSlot0
+      MaterialInterface = MaterialInstanceConstant'/Game/Nested/MI_W0.MI_W0'
+   }
+   StaticMaterials[1] =
+   {
+      MaterialSlotName = WrapSlot1
+      MaterialInterface = MaterialInstanceConstant'/Game/Nested/MI_W1.MI_W1'
+   }
+}

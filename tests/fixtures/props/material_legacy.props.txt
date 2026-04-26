@@ -1,0 +1,34 @@
+Begin Object Class=MaterialInstanceConstant Name="MI_Legacy_Body"
+   Parent = MaterialInstanceConstant'MI_Factory2D_01'
+   TwoSided = true
+   bIsMasked = false
+   BlendMode = BLEND_Opaque
+
+   TextureParameterValues[0] =
+   {
+      ParameterInfo = { Name=BaseColor }
+      ParameterValue = Texture2D'/Game/Legacy/T_Legacy_Body_C.T_Legacy_Body_C'
+   }
+   TextureParameterValues[1] =
+   {
+      ParameterInfo = { Name=Normal }
+      ParameterValue = Texture2D'/Game/Legacy/T_Legacy_Body_N.T_Legacy_Body_N'
+   }
+   TextureParameterValues[2] =
+   {
+      ParameterInfo = { Name=BaseColor }
+      ParameterValue = Texture2D'/Game/Legacy/T_Legacy_Body_C.T_Legacy_Body_C'
+   }
+
+   VectorParameterValues[0] =
+   {
+      ParameterInfo = { Name=RColorTint }
+      ParameterValue = { R=0.646, G=0.433, B=0.168, A=1 }
+   }
+
+   ScalarParameterValues[0] =
+   {
+      ParameterInfo = { Name=RoughnessAdjust }
+      ParameterValue = 0.42
+   }
+End Object

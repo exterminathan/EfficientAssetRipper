@@ -1,0 +1,22 @@
+{
+  "Type": "SkeletalMesh",
+  "Name": "SK_Trooper",
+  "Properties": {
+    "SkeletalMaterials": [
+      {
+        "MaterialSlotName": "BodySlot",
+        "Material": {
+          "ObjectName": "MaterialInstanceConstant'MI_Trooper_Body'",
+          "ObjectPath": "/Game/Characters/Trooper/Materials/MI_Trooper_Body.MI_Trooper_Body"
+        }
+      },
+      {
+        "MaterialSlotName": "HelmetSlot",
+        "Material": {
+          "ObjectName": "MaterialInstanceConstant'MI_Trooper_Helmet'",
+          "ObjectPath": "/Game/Characters/Trooper/Materials/MI_Trooper_Helmet.MI_Trooper_Helmet"
+        }
+      }
+    ]
+  }
+}

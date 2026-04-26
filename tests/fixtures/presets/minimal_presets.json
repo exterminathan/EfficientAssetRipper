@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "ignore_textures": ["DefaultTexture"],
+  "ignore_patterns": ["BlendFunc"],
+  "presets": {
+    "default_pbr": {
+      "description": "Minimal test preset",
+      "priority_order": ["base_color", "normal", "orm"],
+      "texture_slots": {
+        "base_color": {
+          "suffixes": ["_C", "_BaseColor"],
+          "param_names": ["BaseColor", "Diffuse"],
+          "colorspace": "sRGB",
+          "wiring": {"type": "direct", "target_input": "Base Color"}
+        },
+        "normal": {
+          "suffixes": ["_N", "_Normal"],
+          "param_names": ["Normal"],
+          "colorspace": "Non-Color",
+          "wiring": {"type": "normal_map"}
+        },
+        "orm": {
+          "suffixes": ["_ORM"],
+          "param_names": [],
+          "colorspace": "Non-Color",
+          "wiring": {"type": "split_channels"}
+        }
+      }
+    }
+  },
+  "material_overrides": {
+    "MI_Override_Demo": {
+      "preset": "default_pbr",
+      "force_textures": {
+        "base_color": "ForcedBaseColor"
+      }
+    }
+  }
+}

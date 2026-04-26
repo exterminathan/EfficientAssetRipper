@@ -1,0 +1,9 @@
+Blender 4.0.2 (hash deadbeef built 2024-01-01)
+Read prefs: C:/Users/x/AppData/Roaming/Blender Foundation/Blender/4.0/config/userpref.blend
+##ASSET_STATUS##{"status":"started","asset":"SK_Trooper"}
+##ASSET_STATUS##{"status":"progress","step":"addon_enabled"}
+##ASSET_STATUS##{"status":"progress","step":"psk_imported"}
+##ASSET_STATUS##{"status":"warning","message":"Material slot 'HelmetSlot' had no manifest entry"}
+##ASSET_STATUS##{"status":"progress","step":"material_wired","material":"MI_Trooper_Body"}
+##ASSET_STATUS##{"status":"completed","materials_processed":1,"materials_failed":0}
+Saved "C:/outputs/SK_Trooper.blend"

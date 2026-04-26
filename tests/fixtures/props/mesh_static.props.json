@@ -1,0 +1,15 @@
+{
+  "Type": "StaticMesh",
+  "Name": "SM_Crate",
+  "Properties": {
+    "StaticMaterials": [
+      {
+        "MaterialSlotName": "MainSlot",
+        "MaterialInterface": {
+          "ObjectName": "Material'M_Crate'",
+          "ObjectPath": "/Game/Props/Crate/M_Crate.M_Crate"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,46 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "unit: pure logic, no I/O, fast",
+    "integration: disk/JSON I/O, multi-module",
+    "qt: requires QApplication via pytest-qt",
+    "gui: full window construction",
+    "slow: runs > 1s",
+    "requires_blender: needs blender executable on PATH or env BLENDER_EXE",
+    "requires_dotnet_cli: needs built CUE4ParseCLI.exe (env CUE4PARSE_CLI)",
+    "requires_everything: needs Everything64.dll loadable (env EVERYTHING_DLL)",
+    "windows_only: skip if not running on win32",
+]
+qt_api = "pyside6"
+filterwarnings = [
+    "ignore::DeprecationWarning:PySide6.*",
+]
+
+[tool.coverage.run]
+source = ["core", "gui", "blender", "config", "_base"]
+branch = true
+omit = [
+    "*/__pycache__/*",
+    "main.py",
+    "gui/splash.py",
+    "tests/*",
+    "blender/process_asset.py",
+    "blender/material_setup.py",
+    "blender/combine_blends.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

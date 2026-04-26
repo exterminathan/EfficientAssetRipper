@@ -173,6 +173,79 @@ The output will be in `dist/EfficientAssetRipper/`.
 
 ---
 
+## Running Tests
+
+A pytest-based test suite covers the core parsers, the asset scanner, the
+CUE4ParseCLI IPC layer, and the PySide6 widgets. Tests are standalone — they
+do **not** run automatically when you launch the app, but the build pipeline
+gates `build.bat` on the unit + integration + Qt tiers.
+
+### Install dev dependencies (one-time)
+
+```bash
+py -m pip install -r requirements-dev.txt
+```
+
+### Run all tests
+
+```bash
+py -m pytest
+```
+
+Expected on a fresh machine: ~230 passed, a handful skipped (the e2e tier
+auto-skips when Blender / Everything / CUE4ParseCLI binaries aren't found).
+Total runtime is ~10 seconds.
+
+### Run specific tiers
+
+```bash
+py -m pytest tests/unit            # ~1s, pure logic, no I/O
+py -m pytest tests/integration     # ~1s, real fixtures + disk I/O
+py -m pytest tests/qt              # ~10s, PySide6 widgets via pytest-qt
+```
+
+### Run a single test file or test
+
+```bash
+py -m pytest tests/unit/core/test_classifier.py
+py -m pytest tests/unit/core/test_classifier.py::test_classify_characters_path
+```
+
+### Opt-in binary smoke tests
+
+Set the relevant environment variable, then run with the matching marker:
+
+```bat
+set BLENDER_EXE=C:\Program Files\Blender Foundation\Blender 4.0\blender.exe
+py -m pytest -m requires_blender
+
+set CUE4PARSE_CLI=cue4parse_cli\bin\publish\CUE4ParseCLI.exe
+py -m pytest -m requires_dotnet_cli
+
+set EVERYTHING_DLL=C:\Program Files\Everything\Everything64.dll
+py -m pytest -m requires_everything
+```
+
+### Coverage report
+
+```bash
+py -m pytest --cov --cov-report=html
+start htmlcov\index.html
+```
+
+### How tests slot into other workflows
+
+- `build.bat` runs the fast tiers automatically as step `[0b/5]` and aborts the
+  build on any failure.
+- Other scripts can queue the suite via `py -m pytest <args>`. Exit code is 0
+  on success, non-zero on any failure.
+- `tests/unit/test_environment.py` reports required vs. optional dependencies
+  (Python version, PySide6, Pillow, Blender, .NET, Everything DLL, etc.).
+  Required failures abort; optional warnings tell you which `requires_*`
+  smoke tests will be skipped on this machine.
+
+---
+
 ## Project Structure
 
 ```

@@ -1,0 +1,14 @@
+Begin Object Class=MaterialInstanceConstant Name="MI_StreamingOnly"
+   TextureStreamingData[0] =
+   {
+      TextureName = Bark_C
+   }
+   TextureStreamingData[1] =
+   {
+      TextureName = Bark_N
+   }
+   TextureStreamingData[2] =
+   {
+      TextureName = Bark_C
+   }
+End Object

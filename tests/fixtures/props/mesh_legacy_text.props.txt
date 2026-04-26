@@ -1,0 +1,12 @@
+Begin Object Class=SkeletalMesh Name="SK_Legacy"
+   SkeletalMaterials[0] =
+   {
+      MaterialSlotName = LegacySlotA
+      MaterialInterface = MaterialInstanceConstant'/Game/Legacy/MI_LegacyA.MI_LegacyA'
+   }
+   SkeletalMaterials[1] =
+   {
+      MaterialSlotName = LegacySlotB
+      MaterialInterface = MaterialInstanceConstant'/Game/Legacy/MI_LegacyB.MI_LegacyB'
+   }
+End Object

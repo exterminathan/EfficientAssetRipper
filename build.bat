@@ -32,6 +32,22 @@ if %ERRORLEVEL% neq 0 (
 )
 echo.
 
+:: ── Step 0b: Run pre-build tests ─────────────────────────────────────────────
+echo [0b/5] Running pre-build tests...
+py -m pip show pytest >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo      Installing test dependencies...
+    py -m pip install -r requirements-dev.txt
+)
+py -m pytest -q -m "not slow and not requires_blender and not requires_everything and not requires_dotnet_cli" --maxfail=1
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo ERROR: Pre-build tests failed. Aborting build.
+    pause
+    exit /b 1
+)
+echo.
+
 :: ── Step 1: Build Python EXE ─────────────────────────────────────────────────
 echo [1/5] Building Python application with PyInstaller...
 echo.

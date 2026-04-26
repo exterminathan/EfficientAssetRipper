@@ -5,6 +5,13 @@ __pycache__/
 *.pyo
 *.pyd
 
+# ── Test artifacts ────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # ── .NET build artifacts ──────────────────────────────────────────────────────
 cue4parse_cli/obj/
 cue4parse_cli/bin/

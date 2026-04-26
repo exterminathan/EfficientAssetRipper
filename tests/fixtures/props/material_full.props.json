@@ -1,0 +1,55 @@
+{
+  "Type": "MaterialInstanceConstant",
+  "Name": "MI_Trooper_Body",
+  "Properties": {
+    "Parent": {
+      "ObjectName": "Material'MM_Master_PBR'",
+      "ObjectPath": "/Game/Materials/MM_Master_PBR.MM_Master_PBR"
+    },
+    "TextureParameterValues": [
+      {
+        "ParameterInfo": {"Name": "BaseColor", "Association": "GlobalParameter"},
+        "ParameterValue": {
+          "ObjectName": "Texture2D'T_Trooper_Body_C'",
+          "ObjectPath": "/Game/Characters/Trooper/Textures/T_Trooper_Body_C.T_Trooper_Body_C"
+        }
+      },
+      {
+        "ParameterInfo": {"Name": "Normal", "Association": "GlobalParameter"},
+        "ParameterValue": {
+          "ObjectName": "Texture2D'T_Trooper_Body_N'",
+          "ObjectPath": "/Game/Characters/Trooper/Textures/T_Trooper_Body_N.T_Trooper_Body_N"
+        }
+      },
+      {
+        "ParameterInfo": {"Name": "ORM", "Association": "GlobalParameter"},
+        "ParameterValue": {
+          "ObjectName": "Texture2D'T_Trooper_Body_ORM'",
+          "ObjectPath": "/Game/Characters/Trooper/Textures/T_Trooper_Body_ORM.T_Trooper_Body_ORM"
+        }
+      },
+      {
+        "ParameterInfo": {"Name": "ArrayDontWant", "Association": "GlobalParameter"},
+        "ParameterValue": {
+          "ObjectName": "Texture2DArray'T_Trooper_Array'",
+          "ObjectPath": "/Game/Characters/Trooper/Textures/T_Trooper_Array.T_Trooper_Array"
+        }
+      }
+    ],
+    "VectorParameterValues": [
+      {
+        "ParameterInfo": {"Name": "RColorTint"},
+        "ParameterValue": {"R": 0.646, "G": 0.433, "B": 0.168, "A": 1.0}
+      }
+    ],
+    "ScalarParameterValues": [
+      {
+        "ParameterInfo": {"Name": "RoughnessAdjust"},
+        "ParameterValue": 0.42
+      }
+    ],
+    "TwoSided": true,
+    "bIsMasked": false,
+    "BlendMode": "BLEND_Translucent"
+  }
+}
