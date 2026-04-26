@@ -8,7 +8,18 @@ echo.
 
 set "PROJECT_DIR=%~dp0"
 set "DIST_DIR=%PROJECT_DIR%dist\EfficientAssetRipper"
-set "BUILD_TEMP=%TEMP%\EAR_build"
+
+:: BUILD_TEMP must live on the same drive as PROJECT_DIR so PyInstaller's
+:: makespec (which calls os.path.relpath) doesn't raise ValueError when the
+:: spec dir and the source main.py are on different drives. This bites on
+:: GitHub Actions runners where the workspace is on D:\ but %TEMP% is on C:\.
+set "PROJECT_DRIVE=%PROJECT_DIR:~0,2%"
+set "TEMP_DRIVE=%TEMP:~0,2%"
+if /I "%PROJECT_DRIVE%"=="%TEMP_DRIVE%" (
+    set "BUILD_TEMP=%TEMP%\EAR_build"
+) else (
+    set "BUILD_TEMP=%PROJECT_DIR%build\EAR_build"
+)
 
 :: Skip interactive `pause` calls when running unattended (CI, scripts).
 :: Set the CI env var (GitHub Actions does this automatically) or
