@@ -6,6 +6,17 @@ A desktop application for extracting Unreal Engine game assets and automatically
 
 ---
 
+## ⚖️ Legal
+
+**For use only on games you legally own.** This tool extracts assets from
+Unreal Engine games for personal study, modding, and educational purposes.
+Respect publisher EULAs and copyright law — extracted assets are still owned
+by their original publishers and must not be redistributed. The author is
+not affiliated with any game studio mentioned in this project, and provides
+this software with no warranty.
+
+---
+
 ## Features
 
 - **Asset Scanner** — Finds PSK/PSKX mesh files via [Everything SDK](https://www.voidtools.com/) with instant search across game directories
@@ -377,4 +388,10 @@ Key settings:
 
 ## License
 
-This project is provided as-is for personal and educational use.
+Released under the MIT License — see [LICENSE](LICENSE).
+
+EfficientAssetRipper is provided **as-is, with no warranty**, for use only on
+games you legally own. Extracted assets remain the property of their original
+publishers; respect EULAs, copyright law, and do not redistribute extracted
+content. The author is not affiliated with any game studio mentioned in this
+project.
