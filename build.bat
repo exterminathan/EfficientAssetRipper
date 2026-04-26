@@ -121,7 +121,7 @@ set "CLI_PUB=%TEMP%\CUE4ParseCLI_publish"
 set "CLI_OBJ=%TEMP%\CUE4ParseCLI_obj"
 set "CLI_BIN=%TEMP%\CUE4ParseCLI_bin"
 
-dotnet publish "%PROJECT_DIR%cue4parse_cli\CUE4ParseCLI.csproj" -c Release -r win-x64 --self-contained false -o "%CLI_PUB%" -p:BaseIntermediateOutputPath="%CLI_OBJ%\" -p:BaseOutputPath="%CLI_BIN%\"
+dotnet publish "%PROJECT_DIR%cue4parse_cli\CUE4ParseCLI.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:GenerateAssemblyInfo=false -p:GenerateTargetFrameworkAttribute=false -o "%CLI_PUB%" -p:BaseIntermediateOutputPath="%CLI_OBJ%\" -p:BaseOutputPath="%CLI_BIN%\"
 if %ERRORLEVEL% neq 0 (
     echo WARNING: CUE4ParseCLI build failed. Skipping.
     echo.

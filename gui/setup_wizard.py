@@ -60,9 +60,20 @@ def detect_everything() -> tuple[bool, str]:
 
 
 def detect_dotnet() -> tuple[bool, str]:
-    """Return (found, detail). Probes `dotnet --version` on PATH."""
+    """Return (found, detail).
+
+    The CUE4Parse CLI is shipped self-contained (the .NET runtime is baked
+    into ``CUE4ParseCLI.exe``), so we first check whether the bundled CLI
+    exists — if so, the user needs nothing else. Only fall back to probing
+    ``dotnet --version`` when the bundled CLI is missing (which means the
+    user is running from source and needs .NET to build it).
+    """
+    cli_path = base_dir() / "cue4parse_cli" / "bin" / "publish" / "CUE4ParseCLI.exe"
+    if cli_path.is_file():
+        return True, "CUE4Parse CLI bundled (no .NET install needed)"
+
     if not shutil.which("dotnet"):
-        return False, ".NET runtime not on PATH"
+        return False, ".NET SDK not on PATH — needed to build CUE4ParseCLI from source"
     try:
         proc = subprocess.run(
             ["dotnet", "--version"],
@@ -72,7 +83,7 @@ def detect_dotnet() -> tuple[bool, str]:
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         ver = proc.stdout.strip().splitlines()[0] if proc.stdout else "unknown"
-        return True, f".NET {ver}"
+        return True, f".NET {ver} (will build CUE4ParseCLI on first build)"
     except (subprocess.SubprocessError, OSError) as e:
         return False, f"dotnet check failed: {e}"
 
@@ -129,7 +140,7 @@ class _DependencyPage(QWizardPage):
         for key, label, hint_url in (
             ("blender", "Blender 4.0+", "https://www.blender.org/download/"),
             ("everything", "Everything (must be running)", "https://www.voidtools.com/"),
-            ("dotnet", ".NET 8.0 Runtime", "https://dotnet.microsoft.com/download/dotnet/8.0"),
+            ("dotnet", "CUE4Parse CLI / .NET 8.0", "https://dotnet.microsoft.com/download/dotnet/8.0"),
         ):
             row = QHBoxLayout()
             status = QLabel("…")
