@@ -79,6 +79,11 @@ class ProfileBar(QWidget):
         if select and select in names:
             self._combo.setCurrentText(select)
             self._active_profile = select
+        elif names and not self._active_profile:
+            # No explicit selection and no prior active profile — fall back
+            # to the first available so subsequent revert-on-cancel works.
+            self._combo.setCurrentText(names[0])
+            self._active_profile = names[0]
         self._combo.blockSignals(False)
 
     def current_profile(self) -> str:

@@ -467,9 +467,16 @@ class UnpackerPanel(QWidget):
         mappings = self._mappings_edit.text().strip()
         self._unpacker.initialize(game_dir, aes_keys, ue_version, mappings)
 
-    @Slot(int, int, int, int)
+    @Slot(int, int, int, int, int)
     def _on_initialized(self, archive_count: int, unmounted_count: int,
                         file_count: int, keys_submitted: int, loose_file_count: int = 0):
+        # Defensive: clamp negative counts (CLI bug shouldn't take down the GUI)
+        archive_count = max(0, archive_count)
+        unmounted_count = max(0, unmounted_count)
+        file_count = max(0, file_count)
+        keys_submitted = max(0, keys_submitted)
+        loose_file_count = max(0, loose_file_count)
+
         self._mounted = True
         self._mount_btn.setEnabled(True)
         self._tree.setEnabled(True)
@@ -1010,43 +1017,57 @@ class UnpackerPanel(QWidget):
             QMessageBox.warning(self, "No Output", "Set an output directory first.")
             return
 
+        # Only operate on selected folder items; ignore non-folder rows so a
+        # mixed selection doesn't silently drop items.
+        folder_paths: list[str] = []
+        for item in selected:
+            is_folder = item.data(0, Qt.ItemDataRole.UserRole + 1)
+            vfs_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
+            if is_folder and vfs_path:
+                folder_paths.append(vfs_path)
+
+        if not folder_paths:
+            QMessageBox.information(
+                self, "No Folders",
+                "Selection contains no folders. Select one or more folder rows.",
+            )
+            return
+
         config.set("unpack_output_dir", output_dir)
         self._export_output_dir = output_dir
 
-        # Use the first selected folder
-        item = selected[0]
-        vfs_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
-
         self._begin_export()
 
-        # Collect wwise audio entries if exporting an Events folder
+        # Collect wwise audio entries if any selected folder is under Events.
         wwise_entries = []
-        if self._wwise_scan_done and self._wwise_events_prefix:
-            events_path = self._wwise_events_prefix.rstrip("/")
-            if vfs_path == events_path or vfs_path.startswith(events_path + "/"):
-                if vfs_path == events_path:
-                    rel_prefix = ""
-                else:
-                    rel_prefix = vfs_path[len(events_path) + 1:]
-
-                for folder, entries in self._wwise_audio_map.items():
-                    if rel_prefix == "" or folder == rel_prefix or folder.startswith(rel_prefix + "/"):
-                        for audio in entries:
-                            evt_folder = audio.get("event_folder", "")
-                            full_folder = (self._wwise_events_prefix.rstrip("/") + "/" + evt_folder).strip("/") if evt_folder else self._wwise_events_prefix.rstrip("/")
-                            wwise_entries.append({
-                                "wem_vfs_path": audio["wem_vfs_path"],
-                                "target_name": audio["debug_name"],
-                                "target_folder": full_folder,
-                            })
+        events_path = self._wwise_events_prefix.rstrip("/") if self._wwise_events_prefix else ""
+        if self._wwise_scan_done and events_path:
+            for vfs_path in folder_paths:
+                if vfs_path == events_path or vfs_path.startswith(events_path + "/"):
+                    rel_prefix = "" if vfs_path == events_path else vfs_path[len(events_path) + 1:]
+                    for folder, entries in self._wwise_audio_map.items():
+                        if rel_prefix == "" or folder == rel_prefix or folder.startswith(rel_prefix + "/"):
+                            for audio in entries:
+                                evt_folder = audio.get("event_folder", "")
+                                full_folder = (events_path + "/" + evt_folder).strip("/") if evt_folder else events_path
+                                wwise_entries.append({
+                                    "wem_vfs_path": audio["wem_vfs_path"],
+                                    "target_name": audio["debug_name"],
+                                    "target_folder": full_folder,
+                                })
 
         if wwise_entries:
             # Chain: send folder export first, queue wwise for after it completes
             self._pending_wwise_export = (wwise_entries, output_dir)
 
-        self._unpacker.export_folder(vfs_path, output_dir, self._get_formats(),
-                                     texture_format=config.get("export_texture_format"),
-                                     audio_format=config.get("export_audio_format"))
+        # Export each selected folder. Only the *last* request will trigger
+        # the chained WWise export; the CLI processes them sequentially.
+        for vfs_path in folder_paths:
+            self._unpacker.export_folder(
+                vfs_path, output_dir, self._get_formats(),
+                texture_format=config.get("export_texture_format"),
+                audio_format=config.get("export_audio_format"),
+            )
 
     def _begin_export(self):
         self._exporting = True
@@ -1057,6 +1078,10 @@ class UnpackerPanel(QWidget):
         self._progress.setMaximum(0)
         self._progress.setValue(0)
         self._status_label.setText("Exporting...")
+
+    def cancel_export(self):
+        """Public entry point — used by MainWindow on profile switch / shutdown."""
+        self._cancel_export()
 
     def _cancel_export(self):
         self._unpacker.cancel()
@@ -1193,17 +1218,20 @@ class UnpackerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _browse_game_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "Select Game Content Folder")
+        start = self._game_dir_edit.text().strip()
+        path = QFileDialog.getExistingDirectory(self, "Select Game Content Folder", start)
         if path:
             self._game_dir_edit.setText(path)
 
     def _browse_output_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        start = self._output_dir_edit.text().strip()
+        path = QFileDialog.getExistingDirectory(self, "Select Output Directory", start)
         if path:
             self._output_dir_edit.setText(path)
 
     def _browse_mappings(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Mappings File", "",
+        start = self._mappings_edit.text().strip()
+        path, _ = QFileDialog.getOpenFileName(self, "Select Mappings File", start,
                                                "USMAP Files (*.usmap);;All Files (*)")
         if path:
             self._mappings_edit.setText(path)

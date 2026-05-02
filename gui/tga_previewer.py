@@ -4,11 +4,57 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage, QPixmap, QPainter, QWheelEvent, QDragEnterEvent, QDropEvent, QMouseEvent
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
 
 from PIL import Image as PILImage
+
+# Force PIL plugin discovery on the GUI thread up front. PIL's `preinit()`
+# imports image-format plugin modules lazily on first `Image.open()`, and
+# Python's import lock isn't thread-safe under the QThreadPool worker model
+# we use below — running it cold from a worker can crash with an access
+# violation on Windows.
+try:
+    PILImage.preinit()
+except Exception:
+    pass
+
+
+# Drag-accept and load-time recognition cover most texture formats CUE4Parse
+# emits — keep these in sync with `_IMAGE_EXTS` in unpacker_panel.
+_SUPPORTED_EXTS = (".tga", ".png", ".jpg", ".jpeg", ".bmp", ".dds")
+
+
+class _ImageLoadSignals(QObject):
+    """QRunnable can't subclass QObject directly — split signals out."""
+
+    loaded = Signal(int, QImage, int, int, str)  # token, image, w, h, name
+    failed = Signal(int, str, str)               # token, name, error
+
+
+class _ImageLoadRunnable(QRunnable):
+    """Decode an image off the GUI thread."""
+
+    def __init__(self, token: int, path: str, signals: _ImageLoadSignals):
+        super().__init__()
+        self._token = token
+        self._path = path
+        self._signals = signals
+
+    def run(self):
+        name = Path(self._path).name
+        try:
+            pil_img = PILImage.open(self._path)
+            pil_img = pil_img.convert("RGBA")
+            data = pil_img.tobytes("raw", "RGBA")
+            img = QImage(data, pil_img.width, pil_img.height, QImage.Format.Format_RGBA8888)
+            # QImage doesn't own the buffer, so copy it.
+            img = img.copy()
+        except Exception as e:
+            self._signals.failed.emit(self._token, name, str(e))
+            return
+        self._signals.loaded.emit(self._token, img, img.width(), img.height(), name)
 
 
 class TGAPreviewerPanel(QWidget):
@@ -23,7 +69,7 @@ class TGAPreviewerPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._label = QLabel("Drop a TGA file here to preview")
+        self._label = QLabel("Drop an image here to preview (TGA, PNG, JPG, BMP, DDS)")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._label)
 
@@ -35,6 +81,12 @@ class TGAPreviewerPanel(QWidget):
         self._view.setScene(self._scene)
         self._pixmap_item: QGraphicsPixmapItem | None = None
 
+        # Background loader — wired once, reused for every load.
+        self._load_token = 0
+        self._load_signals = _ImageLoadSignals()
+        self._load_signals.loaded.connect(self._on_load_done)
+        self._load_signals.failed.connect(self._on_load_failed)
+
     # ------------------------------------------------------------------
     # Drag and drop
     # ------------------------------------------------------------------
@@ -42,14 +94,14 @@ class TGAPreviewerPanel(QWidget):
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(".tga"):
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(_SUPPORTED_EXTS):
                     event.acceptProposedAction()
                     return
 
     def dropEvent(self, event: QDropEvent):
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if path.lower().endswith(".tga"):
+            if path.lower().endswith(_SUPPORTED_EXTS):
                 self._load_image(path)
                 event.acceptProposedAction()
                 return
@@ -67,18 +119,20 @@ class TGAPreviewerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _load_image(self, path: str):
-        try:
-            pil_img = PILImage.open(path)
-            pil_img = pil_img.convert("RGBA")
-            data = pil_img.tobytes("raw", "RGBA")
-            img = QImage(data, pil_img.width, pil_img.height, QImage.Format.Format_RGBA8888)
-            # QImage doesn't own the buffer, so copy it
-            img = img.copy()
-        except Exception as e:
-            self._label.setText(f"Failed to load: {Path(path).name}\n{e}")
-            self._label.setVisible(True)
-            self._view.setVisible(False)
-            return
+        # Token bumps invalidate any in-flight previous load; the QRunnable
+        # checks self._load_token before applying its result.
+        self._load_token += 1
+        token = self._load_token
+        self._label.setText(f"Loading: {Path(path).name}...")
+        self._label.setVisible(True)
+        self._view.setVisible(False)
+
+        runnable = _ImageLoadRunnable(token, path, self._load_signals)
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_load_done(self, token: int, img: QImage, w: int, h: int, name: str):
+        if token != self._load_token:
+            return  # superseded by a newer request
 
         pixmap = QPixmap.fromImage(img)
 
@@ -91,9 +145,14 @@ class TGAPreviewerPanel(QWidget):
         self._view.resetTransform()
         self._view.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
-        name = Path(path).name
-        w, h = pixmap.width(), pixmap.height()
         self._view.set_status_text(f"{name} | {w} x {h}")
+
+    def _on_load_failed(self, token: int, name: str, error: str):
+        if token != self._load_token:
+            return
+        self._label.setText(f"Failed to load: {name}\n{error}")
+        self._label.setVisible(True)
+        self._view.setVisible(False)
 
 
 class _ZoomGraphicsView(QGraphicsView):

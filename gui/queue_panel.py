@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QColor, QIcon
-from PySide6.QtWidgets import (    QAbstractItemView,
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -16,7 +17,6 @@ from PySide6.QtWidgets import (    QAbstractItemView,
     QWidget,
 )
 
-import config
 from core.asset_scanner import AssetEntry
 import gui.theme as theme
 
@@ -185,7 +185,6 @@ class QueuePanel(QWidget):
         if row < self._table.rowCount():
             self._table.item(row, 2).setText(step)
 
-    @Slot(int, int, int)
     def set_resolving(self, enabled: bool):
         """Disable/enable the Process Queue button while resolving assets."""
         self._process_btn.setEnabled(not enabled)
@@ -234,5 +233,6 @@ class QueuePanel(QWidget):
         from gui.asset_browser import AssetDetailDialog
         asset = self._items[row]
         dlg = AssetDetailDialog(asset, parent=self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.reprocess_requested.connect(self.reprocess_requested.emit)
         dlg.exec()

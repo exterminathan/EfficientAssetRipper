@@ -112,8 +112,10 @@ def _load_saved_custom_schemes():
         custom = json.loads(raw)
         for name, colors in custom.items():
             register_custom_scheme(name, colors)
-    except (json.JSONDecodeError, TypeError):
-        pass
+    except (json.JSONDecodeError, TypeError) as e:
+        logging.getLogger(__name__).warning(
+            "Failed to parse custom_schemes from config: %s", e
+        )
 
 
 def main():

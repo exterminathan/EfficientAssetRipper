@@ -51,12 +51,19 @@ def test_settings_dialog_load_populates_fields_from_config(qtbot, mock_qsettings
     assert dlg.addon_name.text() == "addon.from.config"
 
 
-def test_settings_dialog_save_writes_to_config(qtbot, mock_qsettings):
+def test_settings_dialog_save_writes_to_config(qtbot, mock_qsettings, monkeypatch):
     dlg = SettingsDialog()
     qtbot.addWidget(dlg)
     dlg.game_folder.setText(r"C:\Games\NEW")
     dlg.addon_name.setText("custom.addon.name")
     dlg.timeout.setValue(300)
+
+    # Validation prompts on missing paths — auto-confirm "Save anyway".
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **kw: QMessageBox.StandardButton.Yes),
+    )
 
     with qtbot.waitSignal(dlg.settings_changed, timeout=1000):
         dlg._save()
@@ -64,6 +71,43 @@ def test_settings_dialog_save_writes_to_config(qtbot, mock_qsettings):
     assert config.get("game_folder") == r"C:\Games\NEW"
     assert config.get("psk_addon_name") == "custom.addon.name"
     assert config.get_int("timeout_seconds") == 300
+
+
+def test_settings_dialog_save_aborts_on_missing_path_confirm_no(qtbot, mock_qsettings, monkeypatch):
+    """Saying No to the missing-path prompt should abort the save."""
+    dlg = SettingsDialog()
+    qtbot.addWidget(dlg)
+    dlg.game_folder.setText(r"C:\Games\Nope_Definitely_Missing")
+    config.set("game_folder", r"C:\Games\Old")
+
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **kw: QMessageBox.StandardButton.No),
+    )
+
+    dlg._save()
+
+    # Old value should remain untouched because save was aborted.
+    assert config.get("game_folder") == r"C:\Games\Old"
+
+
+def test_open_presets_warns_on_missing_path(qtbot, mock_qsettings, monkeypatch):
+    """Opening a non-existent presets file should warn instead of crashing."""
+    from PySide6.QtWidgets import QMessageBox
+
+    dlg = SettingsDialog()
+    qtbot.addWidget(dlg)
+    dlg.presets_path.setText(r"C:\Nope\does_not_exist.json")
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda *a, **kw: captured.setdefault("called", True)),
+    )
+
+    dlg._open_presets()
+    assert captured.get("called") is True
 
 
 def test_settings_dialog_timeout_clamped(qtbot, mock_qsettings):

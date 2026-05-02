@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+import gui.theme as theme
 
 
 class TextViewer(QWidget):
@@ -33,7 +35,11 @@ class TextViewer(QWidget):
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search...")
         self._search.setFixedWidth(200)
-        self._search.textChanged.connect(self._on_search)
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(150)
+        self._search_debounce.timeout.connect(self._apply_search)
+        self._search.textChanged.connect(lambda _: self._search_debounce.start())
         header.addWidget(self._search)
 
         self._match_label = QLabel("")
@@ -77,9 +83,11 @@ class TextViewer(QWidget):
     # Search
     # ------------------------------------------------------------------
 
-    def _on_search(self, text: str):
-        """Highlight and jump to search matches."""
+    def _apply_search(self):
+        """Highlight and jump to search matches (debounced via _search_debounce)."""
         from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor
+
+        text = self._search.text()
 
         # Clear previous highlights
         cursor = self._editor.textCursor()
@@ -93,10 +101,11 @@ class TextViewer(QWidget):
             self._match_label.setText("")
             return
 
-        # Highlight all matches
+        # Highlight all matches — pull colours from the active theme.
+        scheme = theme.current_scheme()
         highlight = QTextCharFormat()
-        highlight.setBackground(QColor(100, 80, 0))
-        highlight.setForeground(QColor(255, 255, 255))
+        highlight.setBackground(QColor(scheme["warning"]))
+        highlight.setForeground(QColor(scheme["text_bright"]))
 
         doc = self._editor.document()
         cursor = QTextCursor(doc)

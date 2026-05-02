@@ -79,10 +79,46 @@ def test_filter_text_narrows_visible(qtbot):
     assert _count_leaves(b) == 2
 
     b._search.setText("AlphaThing")
-    assert _count_leaves(b) == 1
+    # Filter rebuilds are debounced (150 ms) — wait for the timer to fire
+    # rather than racing it.
+    qtbot.waitUntil(lambda: _count_leaves(b) == 1, timeout=2000)
 
     b._search.setText("")
-    assert _count_leaves(b) == 2
+    qtbot.waitUntil(lambda: _count_leaves(b) == 2, timeout=2000)
+
+
+def test_filter_debounce_coalesces_rapid_typing(qtbot):
+    """Rapid textChanged events should produce a single rebuild after the timer."""
+    b = AssetBrowser()
+    qtbot.addWidget(b)
+    b.set_assets([
+        _entry("AlphaThing", "Characters"),
+        _entry("BetaThing", "Characters"),
+    ])
+    rebuilds = []
+    original = b._rebuild_tree
+
+    def _spy():
+        rebuilds.append(True)
+        original()
+
+    b._rebuild_tree = _spy
+    b._filter_debounce.timeout.disconnect()
+    b._filter_debounce.timeout.connect(_spy)
+
+    for ch in ("A", "Al", "Alp"):
+        b._search.setText(ch)
+    qtbot.waitUntil(lambda: len(rebuilds) >= 1, timeout=2000)
+    # All three keystrokes should have collapsed into one rebuild.
+    assert len(rebuilds) == 1
+
+
+def test_assets_property_returns_list(qtbot):
+    b = AssetBrowser()
+    qtbot.addWidget(b)
+    e = _entry("X", "Items")
+    b.set_assets([e])
+    assert b.assets == [e]
 
 
 def test_get_selected_assets_returns_only_checked(qtbot):

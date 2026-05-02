@@ -85,12 +85,22 @@ class ZoomableTree(QTreeWidget):
             delta = event.angleDelta().y()
             font = self.font()
             size = font.pointSize()
+            if size <= 0:
+                size = 10
             if delta > 0:
-                size = min(size + 1, 48)
+                new_size = min(size + 1, 48)
             elif delta < 0:
-                size = max(size - 1, 6)
-            font.setPointSize(size)
-            self.setFont(font)
+                new_size = max(size - 1, 6)
+            else:
+                new_size = size
+            if new_size != size:
+                # Scale column widths in proportion to the font size so the
+                # zoom level doesn't crush narrow columns into illegibility.
+                ratio = new_size / size
+                for col in range(self.columnCount()):
+                    self.setColumnWidth(col, max(20, int(self.columnWidth(col) * ratio)))
+                font.setPointSize(new_size)
+                self.setFont(font)
             event.accept()
         else:
             super().wheelEvent(event)

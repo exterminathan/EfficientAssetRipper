@@ -29,6 +29,9 @@ def _level_colors():
     }
 
 
+_MAX_LOG_ENTRIES = 5000
+
+
 class LogViewer(QWidget):
     """Read-only, color-coded log output panel."""
 
@@ -71,6 +74,8 @@ class LogViewer(QWidget):
         self._text = QTextEdit()
         self._text.setReadOnly(True)
         self._text.setFont(QFont("Cascadia Code", 9))
+        # Bound the on-screen text so an infinite spam stream can't OOM the GUI.
+        self._text.document().setMaximumBlockCount(_MAX_LOG_ENTRIES)
 
         layout.addWidget(self._text)
 
@@ -78,6 +83,9 @@ class LogViewer(QWidget):
     def append(self, message: str, level: str = "info"):
         """Append a log message with color coding."""
         self._entries.append((message, level))
+        # Cap the in-memory backlog too (drop oldest).
+        if len(self._entries) > _MAX_LOG_ENTRIES:
+            del self._entries[: len(self._entries) - _MAX_LOG_ENTRIES]
 
         # Check filter
         current_filter = self._filter_combo.currentText().lower()

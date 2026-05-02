@@ -7,8 +7,8 @@ import json
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
@@ -262,7 +262,49 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
+    # Path-typed settings: keys checked for existence on save (folder vs file).
+    _PATH_FIELDS_FOLDER = ("game_folder", "output_dir", "unpack_output_dir")
+    _PATH_FIELDS_FILE = ("blender_exe", "everything_dll", "cue4parse_cli")
+
+    def _confirm_missing_path(self, label: str, value: str) -> bool:
+        """Prompt the user when a path is set but doesn't exist on disk."""
+        reply = QMessageBox.question(
+            self,
+            "Path doesn't exist",
+            f"{label}:\n{value}\n\nThis path doesn't exist. Save anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _validate_paths(self) -> bool:
+        """Return False if the user cancels at any non-existent path prompt."""
+        checks: list[tuple[str, str, str]] = [  # (label, value, kind)
+            ("Game Folder", self.game_folder.text().strip(), "folder"),
+            ("Output Directory", self.output_dir.text().strip(), "folder"),
+            ("Unpack Output Dir", self.unpack_output_dir.text().strip(), "folder"),
+            ("Blender Executable", self.blender_exe.text().strip(), "file"),
+            ("Everything SDK DLL", self.everything_dll.text().strip(), "file"),
+            ("CUE4Parse CLI", self.cue4parse_cli.text().strip(), "file"),
+        ]
+        for label, value, kind in checks:
+            if not value:
+                continue
+            ok = os.path.isdir(value) if kind == "folder" else os.path.isfile(value)
+            if ok:
+                continue
+            if not self._confirm_missing_path(label, value):
+                return False
+        return True
+
     def _save(self):
+        # Clamp the timeout into a sane range (the QSpinBox already constrains
+        # via setRange, but be defensive in case the constraint changes).
+        self.timeout.setValue(max(10, min(self.timeout.value(), 3600)))
+
+        if not self._validate_paths():
+            return
+
         config.set("game_folder", self.game_folder.text())
         config.set("blender_exe", self.blender_exe.text())
         config.set("output_dir", self.output_dir.text())
@@ -461,9 +503,14 @@ class SettingsDialog(QDialog):
         config.set("custom_schemes", json.dumps(custom))
 
     def _open_presets(self):
-        path = self.presets_path.text()
-        if path and os.path.isfile(path):
-            os.startfile(path)  # Windows-specific
+        path = self.presets_path.text().strip()
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(
+                self, "Presets file not found",
+                f"Could not open texture presets:\n{path or '(no path set)'}",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _run_tests(self):
         """Test all configured paths and SDK connections."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QRunnable, QThread, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -67,6 +67,7 @@ class ScanWorker(QThread):
 
     def cancel(self):
         self._scanner.cancel()
+        self.requestInterruption()
 
     def run(self):
         try:
@@ -89,12 +90,21 @@ class RescanWorker(QThread):
         super().__init__(parent)
         self._scanner = scanner
         self._entries = entries
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+        self._scanner.cancel()
+        self.requestInterruption()
 
     def run(self):
         try:
             total = len(self._entries)
             resolved = 0
             for idx, entry in enumerate(self._entries):
+                if self._cancelled or self.isInterruptionRequested():
+                    self.progress.emit(idx, total, "Re-scan cancelled")
+                    break
                 self.progress.emit(idx, total, f"Re-scanning: {entry.name}")
                 self._scanner.resolve_entry(entry)
                 if entry.status == "ready":
@@ -117,12 +127,21 @@ class _PickerResolveWorker(QThread):
         super().__init__(parent)
         self._scanner = scanner
         self._entries = entries
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+        self._scanner.cancel()
+        self.requestInterruption()
 
     def run(self):
         try:
             total = len(self._entries)
             resolved = 0
             for idx, entry in enumerate(self._entries):
+                if self._cancelled or self.isInterruptionRequested():
+                    self.progress.emit(idx, total, "Resolve cancelled")
+                    break
                 self.progress.emit(idx, total, f"Resolving: {entry.name}")
                 self._scanner.resolve_entry(entry)
                 if entry.status == "ready":
@@ -132,6 +151,32 @@ class _PickerResolveWorker(QThread):
             self.finished.emit(resolved, still_incomplete)
         except Exception as e:
             self.error.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Cache write runnable — moves disk I/O off the GUI thread
+# ---------------------------------------------------------------------------
+
+class _CacheWriteRunnable(QRunnable):
+    """Submits save_scan_cache work to QThreadPool."""
+
+    def __init__(self, assets: list, game_folder: str, on_done=None):
+        super().__init__()
+        self._assets = list(assets)
+        self._game_folder = game_folder
+        self._on_done = on_done
+
+    def run(self):
+        try:
+            save_scan_cache(self._assets, self._game_folder)
+        except Exception:
+            log.exception("Async cache write failed")
+        finally:
+            if self._on_done is not None:
+                try:
+                    self._on_done()
+                except Exception:
+                    log.exception("Cache write completion callback failed")
 
 
 # ---------------------------------------------------------------------------
@@ -145,9 +190,13 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1200, 700)
 
         self._job_manager: JobManager | None = None
-        self._scan_worker: ScanWorker | None = None
-        self._scan_worker_running = False
         self._current_profile_name = ""
+        # All long-running QThread workers register here on creation and
+        # auto-prune themselves on `finished`. closeEvent walks the list to
+        # make sure nothing keeps spinning past window destruction.
+        self._active_workers: list[QThread] = []
+        # Outstanding cache writes — closeEvent waits on this counter.
+        self._pending_cache_writes = 0
 
         # Profile manager
         self._profile_manager = ProfileManager()
@@ -155,8 +204,10 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
-        self._maybe_run_setup_wizard()
         self._load_initial_profile()
+        # Defer the setup wizard until after splash → window handoff so the
+        # modal dialog doesn't fight the splash for focus.
+        QTimer.singleShot(0, self._maybe_run_setup_wizard)
 
         # Best-effort startup housekeeping. Old scan-cache backups left behind
         # by version-bump renames pile up otherwise.
@@ -171,11 +222,34 @@ class MainWindow(QMainWindow):
         self._update_checker = None
         QTimer.singleShot(2000, self._start_update_check)
 
+    # ------------------------------------------------------------------
+    # Worker tracking
+    # ------------------------------------------------------------------
+
+    def _track_worker(self, worker: QThread) -> None:
+        """Register a worker thread for shutdown tracking + auto-cleanup."""
+        self._active_workers.append(worker)
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        worker.finished.connect(worker.deleteLater)
+
+    def _on_worker_finished(self, worker: QThread) -> None:
+        try:
+            self._active_workers.remove(worker)
+        except ValueError:
+            pass
+
     def _maybe_run_setup_wizard(self):
         """Show the first-run wizard if it hasn't been completed yet."""
         from gui.setup_wizard import SetupWizard, should_show_setup
         if not should_show_setup():
             return
+        wizard = SetupWizard(self)
+        wizard.exec()
+
+    def _force_run_setup_wizard(self):
+        """Help-menu trigger: re-arm and re-fire the wizard regardless of state."""
+        from gui.setup_wizard import SetupWizard
+        config.set("setup_complete", "")
         wizard = SetupWizard(self)
         wizard.exec()
 
@@ -346,24 +420,30 @@ class MainWindow(QMainWindow):
         self._right_tabs.setCurrentWidget(self._tga_previewer)
 
     def _build_menu(self):
+        from PySide6.QtGui import QKeySequence
+
         menubar = self.menuBar()
 
-        file_menu = menubar.addMenu("File")
-        file_menu.addAction("Settings...", self._open_settings)
+        file_menu = menubar.addMenu("&File")
+        settings_action = file_menu.addAction("&Settings...", self._open_settings)
+        settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
         file_menu.addSeparator()
-        file_menu.addAction("Exit", self.close)
+        exit_action = file_menu.addAction("E&xit", self.close)
+        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
 
-        tools_menu = menubar.addMenu("Tools")
+        tools_menu = menubar.addMenu("&Tools")
         tools_menu.addAction(
-            "Blend Combiner",
+            "&Blend Combiner",
             lambda: self._right_tabs.setCurrentWidget(self._combiner),
         )
 
-        help_menu = menubar.addMenu("Help")
-        help_menu.addAction("About...", self._show_about)
+        help_menu = menubar.addMenu("&Help")
+        help_menu.addAction("Run Setup &Wizard...", self._force_run_setup_wizard)
+        help_menu.addSeparator()
+        help_menu.addAction("&About...", self._show_about)
 
         # ── Window menu — toggle visibility of each tab ───────────────
-        window_menu = menubar.addMenu("Window")
+        window_menu = menubar.addMenu("&Window")
         self._tab_actions = {}
         for tabs, names in [
             (self._left_tabs, ["Asset Browser", "PSK Picker", "Unpacker"]),
@@ -477,7 +557,7 @@ class MainWindow(QMainWindow):
         self._scan_worker.progress.connect(self._on_scan_progress)
         self._scan_worker.finished.connect(self._on_scan_finished)
         self._scan_worker.error.connect(self._on_scan_error)
-        self._scan_worker_running = True
+        self._track_worker(self._scan_worker)
         self._scan_worker.start()
 
     @Slot(int, int, str)
@@ -496,7 +576,6 @@ class MainWindow(QMainWindow):
     def _on_scan_finished(self, assets: list):
         self._scan_btn.setEnabled(True)
         self._cancel_scan_btn.setEnabled(False)
-        self._scan_worker_running = False
         self._browser.set_assets(assets)
         ready = sum(1 for a in assets if a.status == "ready")
         count_msg = f"{len(assets)} assets found, {ready} ready"
@@ -507,23 +586,18 @@ class MainWindow(QMainWindow):
         if processed:
             self._psk_picker.mark_processed(processed)
 
-        # Save cache
+        # Save cache asynchronously
         game_folder = config.get("game_folder")
         if game_folder and assets:
-            try:
-                cache_path = save_scan_cache(assets, game_folder)
-                self._log.append(
-                    f"Scan cached ({len(assets)} assets) — will auto-load next time",
-                    "info",
-                )
-            except Exception as e:
-                self._log.append(f"Failed to save cache: {e}", "warning")
+            self._save_cache_async(
+                assets, game_folder,
+                on_done_msg=f"Scan cached ({len(assets)} assets) — will auto-load next time",
+            )
 
     @Slot(str)
     def _on_scan_error(self, error: str):
         self._scan_btn.setEnabled(True)
         self._cancel_scan_btn.setEnabled(False)
-        self._scan_worker_running = False
         self._log.append(f"Scan failed: {error}", "error")
         self._statusbar.showMessage("Scan failed")
         QMessageBox.critical(self, "Scan Error", error)
@@ -550,20 +624,27 @@ class MainWindow(QMainWindow):
 
     def _is_busy(self) -> bool:
         """Return True if any background operation is running."""
-        if self._scan_worker_running:
+        if any(w.isRunning() for w in self._active_workers):
             return True
         if self._unpacker_panel.is_exporting:
             return True
         if self._job_manager and self._job_manager.isRunning():
             return True
+        if self._pending_cache_writes > 0:
+            return True
         return False
 
     def _cancel_active_ops(self):
         """Cancel whatever background operation is running."""
-        if self._scan_worker_running:
-            self._cancel_scan()
+        for worker in list(self._active_workers):
+            cancel = getattr(worker, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:
+                    log.exception("Worker cancel raised: %s", type(worker).__name__)
         if self._unpacker_panel.is_exporting:
-            self._unpacker_panel._cancel_export()
+            self._unpacker_panel.cancel_export()
         if self._job_manager and self._job_manager.isRunning():
             self._cancel_processing()
 
@@ -740,6 +821,7 @@ class MainWindow(QMainWindow):
         self._picker_worker.progress.connect(self._on_scan_progress)
         self._picker_worker.finished.connect(self._on_picker_resolved)
         self._picker_worker.error.connect(self._on_scan_error)
+        self._track_worker(self._picker_worker)
         self._queue.set_resolving(True)
         self._picker_worker.start()
 
@@ -841,7 +923,7 @@ class MainWindow(QMainWindow):
         self._save_cache()
         # Mark processed items in PSK picker so they can't be re-queued
         processed = [
-            a.psk_path for a in self._browser._assets if a.processed
+            a.psk_path for a in self._browser.assets if a.processed
         ]
         if processed:
             self._psk_picker.mark_processed(processed)
@@ -886,12 +968,34 @@ class MainWindow(QMainWindow):
     def _save_cache(self):
         """Save the browser's current assets to the scan cache and update profile."""
         game_folder = config.get("game_folder")
-        if game_folder and self._browser._assets:
-            try:
-                save_scan_cache(self._browser._assets, game_folder)
-            except Exception:
-                pass
+        assets = self._browser.assets
+        if game_folder and assets:
+            self._save_cache_async(assets, game_folder)
         self._save_current_profile()
+
+    def _save_cache_async(
+        self,
+        assets: list,
+        game_folder: str,
+        on_done_msg: str | None = None,
+    ) -> None:
+        """Submit a cache write to the global QThreadPool. Tracks pending count."""
+        self._pending_cache_writes += 1
+        self._statusbar.showMessage("Saving cache...", 1500)
+
+        def _done():
+            # _on_cache_write_done runs in the worker thread; bounce to GUI
+            # thread via QTimer.singleShot so signal-slot invariants hold.
+            QTimer.singleShot(0, lambda: self._on_cache_write_done(on_done_msg))
+
+        runnable = _CacheWriteRunnable(assets, game_folder, on_done=_done)
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_cache_write_done(self, msg: str | None):
+        if self._pending_cache_writes > 0:
+            self._pending_cache_writes -= 1
+        if msg:
+            self._log.append(msg, "info")
 
     def _on_browser_delete(self, assets: list):
         """Handle deletion of assets from the browser — save updated cache."""
@@ -929,6 +1033,7 @@ class MainWindow(QMainWindow):
         self._rescan_worker.progress.connect(self._on_scan_progress)
         self._rescan_worker.finished.connect(self._on_rescan_finished)
         self._rescan_worker.error.connect(self._on_scan_error)
+        self._track_worker(self._rescan_worker)
         self._rescan_worker.start()
 
     @Slot(int, int)
@@ -941,12 +1046,11 @@ class MainWindow(QMainWindow):
 
         # Update cache
         game_folder = config.get("game_folder")
-        if game_folder and self._browser._assets:
-            try:
-                save_scan_cache(self._browser._assets, game_folder)
-                self._log.append("Cache updated", "info")
-            except Exception as e:
-                self._log.append(f"Failed to save cache: {e}", "warning")
+        assets = self._browser.assets
+        if game_folder and assets:
+            self._save_cache_async(
+                assets, game_folder, on_done_msg="Cache updated"
+            )
 
     # ------------------------------------------------------------------
     # Unpacker hand-off
@@ -975,8 +1079,77 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Save profile and stop the CLI process on exit."""
-        self._save_current_profile()
-        self._unpacker_panel.shutdown()
+        # Save the in-memory profile state up front. If we wait until *after*
+        # cancellation, a partially-cancelled scan could lose its picker /
+        # unpacker state on the way out.
+        try:
+            self._save_current_profile()
+        except Exception:
+            log.exception("save_current_profile during shutdown raised")
+
+        running_workers = [w for w in self._active_workers if w.isRunning()]
+        job_running = bool(self._job_manager and self._job_manager.isRunning())
+        export_running = bool(self._unpacker_panel.is_exporting)
+
+        if running_workers or job_running or export_running:
+            reply = QMessageBox.question(
+                self, "Cancel running operations?",
+                "Background work is still running. Cancel and exit?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
+        self._cancel_active_ops()
+
+        # Wait for workers to drain. We give each worker a reasonable budget
+        # before falling back to terminate(); QProgressDialog keeps the user
+        # informed instead of hanging silently.
+        progress = None
+        if running_workers or job_running:
+            progress = QProgressDialog("Stopping background work...", None, 0, 0, self)
+            progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+            progress.setCancelButton(None)
+            progress.setMinimumDuration(0)
+            progress.show()
+            QApplication.processEvents()
+
+        for worker in running_workers:
+            try:
+                if not worker.wait(5000):
+                    log.warning(
+                        "Worker %s did not exit cleanly within 5s — terminating",
+                        type(worker).__name__,
+                    )
+                    worker.terminate()
+                    worker.wait(2000)
+            except Exception:
+                log.exception("Error waiting for worker %s", type(worker).__name__)
+
+        if self._job_manager and self._job_manager.isRunning():
+            try:
+                if not self._job_manager.wait(5000):
+                    log.warning("JobManager did not exit cleanly — terminating")
+                    self._job_manager.terminate()
+                    self._job_manager.wait(2000)
+            except Exception:
+                log.exception("Error waiting for JobManager")
+
+        # Drain any in-flight cache writes (best-effort).
+        try:
+            QThreadPool.globalInstance().waitForDone(3000)
+        except Exception:
+            log.exception("waitForDone for cache writes raised")
+
+        if progress is not None:
+            progress.close()
+
+        try:
+            self._unpacker_panel.shutdown()
+        except Exception:
+            log.exception("UnpackerPanel.shutdown raised")
         # Block briefly on the update-checker so a long-running HTTP timeout
         # can't keep the QThread alive past the QObject lifetime.
         if self._update_checker is not None:

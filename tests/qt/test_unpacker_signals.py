@@ -225,3 +225,28 @@ def test_oversized_ndjson_line_kills_child_and_emits_error(unpacker_with_stub, q
     assert "oversized" in sig.args[0].lower()
     # The stub's kill() flips state to NotRunning.
     assert proc.state() == QProcess.ProcessState.NotRunning
+
+
+def test_unpacker_panel_clamps_negative_initialized_counts(qtbot, mock_qsettings):
+    """init_done with negative values must not crash the GUI; counts are clamped."""
+    from gui.unpacker_panel import UnpackerPanel
+
+    panel = UnpackerPanel()
+    qtbot.addWidget(panel)
+
+    # Direct slot call avoids needing a real CLI subprocess.
+    panel._on_initialized(-3, -1, -100, -2, -5)
+    assert panel._mounted is True
+    # Status text should reflect 0-clamped values, not negatives.
+    assert "Mounted: 0 archives" in panel._mount_info.text()
+
+
+def test_unpacker_panel_cancel_export_public_alias(qtbot, mock_qsettings):
+    """`cancel_export()` must exist as a public alias on the panel."""
+    from gui.unpacker_panel import UnpackerPanel
+
+    panel = UnpackerPanel()
+    qtbot.addWidget(panel)
+    # The public method should exist and be safely callable when not exporting.
+    assert callable(getattr(panel, "cancel_export", None))
+    panel.cancel_export()

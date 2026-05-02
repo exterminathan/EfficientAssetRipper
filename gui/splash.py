@@ -242,7 +242,7 @@ class SplashScreen(QWidget):
 
         # ── Version footer (visible until iris starts) ───────────────
         if t < _PHASE_ZOOM_END:
-            footer = QColor(c["text_muted"]) if "text_muted" in c else QColor(c.get("text", "#888888"))
+            footer = QColor(c["text_secondary"])
             footer.setAlpha(int(_lerp(0, 200, min(t / _PHASE_RISE_END, 1.0))))
             font = QFont()
             font.setPointSizeF(max(8.0, min(W, H) * 0.012))
@@ -296,5 +296,10 @@ class SplashScreen(QWidget):
     def _on_animation_done(self):
         if not self._finished:
             self._finished = True
-            self._finish_cb()
-            self.close()
+            try:
+                self._finish_cb()
+            finally:
+                # Always close the splash, even if the callback raises;
+                # leaving an invisible WindowStaysOnTop overlay around blocks
+                # input on the main window.
+                self.close()

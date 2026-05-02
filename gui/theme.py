@@ -43,9 +43,16 @@ FONT_SIZE_SMALL = "9pt"
 FONT_SIZE_LARGE = "12pt"
 
 
+_FONTS_LOADED = False
+
+
 def _load_custom_fonts() -> None:
-    """Load all .ttf and .otf files from the fonts/ directory."""
+    """Load all .ttf and .otf files from the fonts/ directory (idempotent)."""
+    global _FONTS_LOADED
+    if _FONTS_LOADED:
+        return
     if not FONTS_DIR.is_dir():
+        _FONTS_LOADED = True
         return
     for fp in sorted(FONTS_DIR.iterdir()):
         if fp.suffix.lower() in (".ttf", ".otf"):
@@ -55,6 +62,7 @@ def _load_custom_fonts() -> None:
             else:
                 families = QFontDatabase.applicationFontFamilies(fid)
                 log.info("Loaded font: %s → %s", fp.name, families)
+    _FONTS_LOADED = True
 
 
 def _font_family() -> str:
@@ -657,6 +665,7 @@ class _BranchCircleStyle(QProxyStyle):
 # ---------------------------------------------------------------------------
 
 _current_scheme_name: str = DEFAULT_SCHEME
+_current_style: "_BranchCircleStyle | None" = None
 
 
 def current_scheme() -> dict[str, str]:
@@ -673,16 +682,25 @@ def apply(app: QApplication, scheme_name: str | None = None) -> None:
 
     Sets the Fusion style, the palette, and the global stylesheet.
     Loads custom fonts from the fonts/ directory on first call.
+    No-ops if the requested scheme is already active.
     """
-    global _current_scheme_name
+    global _current_scheme_name, _current_style
+    if scheme_name and scheme_name == _current_scheme_name and _current_style is not None:
+        # Already applied — nothing to do, avoid stylesheet thrash.
+        return
     if scheme_name:
         _current_scheme_name = scheme_name
     c = get_scheme(_current_scheme_name)
 
     _load_custom_fonts()
 
-    style = _BranchCircleStyle(c["progress_chunk"], "Fusion")
-    style.setParent(app)      # prevent GC
-    app.setStyle(style)
+    # Build the new style first so Qt has its own reference before we drop
+    # ours — `app.setStyle()` takes ownership and deletes the previous one.
+    new_style = _BranchCircleStyle(c["progress_chunk"], "Fusion")
+    new_style.setParent(app)      # prevent GC
+    app.setStyle(new_style)
+    # `_current_style` previously kept a Python ref to the old style; drop it
+    # here so the old QProxyStyle isn't kept alive past Qt's lifetime.
+    _current_style = new_style
     app.setPalette(_build_palette(c))
     app.setStyleSheet(_build_qss(c))

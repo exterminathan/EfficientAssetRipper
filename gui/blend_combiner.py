@@ -79,19 +79,26 @@ class CombineWorker(QThread):
                 "--", tmp_path,
             ]
 
+            # Merge stderr into stdout so a chatty Blender process can't
+            # block on a full stderr pipe while we're only draining stdout.
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 creationflags=(
                     subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 ),
             )
 
+            tail: list[str] = []  # last few lines for error reporting
             for line in proc.stdout:
                 line = line.strip()
                 if not line.startswith("##COMBINE_STATUS##"):
+                    if line:
+                        tail.append(line)
+                        if len(tail) > 20:
+                            del tail[0]
                     continue
                 try:
                     data = json.loads(line[len("##COMBINE_STATUS##"):])
@@ -118,8 +125,11 @@ class CombineWorker(QThread):
 
             proc.wait()
             if proc.returncode != 0:
-                stderr = proc.stderr.read() if proc.stderr else ""
-                self.finished.emit(False, f"Blender exited with code {proc.returncode}: {stderr[:500]}")
+                tail_text = "\n".join(tail[-10:])
+                self.finished.emit(
+                    False,
+                    f"Blender exited with code {proc.returncode}: {tail_text[:500]}",
+                )
             else:
                 self.finished.emit(True, f"Saved → {self._output_path}")
         except Exception as e:
@@ -139,6 +149,7 @@ class BlendCombinerPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker: CombineWorker | None = None
+        self._known_files: set[str] = set()  # mirrors the QListWidget for O(1) lookup
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -172,7 +183,7 @@ class BlendCombinerPanel(QWidget):
         btn_row.addWidget(remove_btn)
 
         clear_btn = QPushButton("Clear All")
-        clear_btn.clicked.connect(self._file_list.clear)
+        clear_btn.clicked.connect(self._clear_all)
         btn_row.addWidget(clear_btn)
 
         btn_row.addStretch()
@@ -234,6 +245,7 @@ class BlendCombinerPanel(QWidget):
         for f in files:
             if not self._has_file(f):
                 self._file_list.addItem(f)
+                self._known_files.add(f)
 
     def _add_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -249,18 +261,21 @@ class BlendCombinerPanel(QWidget):
                     full = os.path.join(root, fn)
                     if not self._has_file(full):
                         self._file_list.addItem(full)
+                        self._known_files.add(full)
                         count += 1
         self._status_label.setText(f"Added {count} files from {folder}")
 
     def _remove_selected(self):
         for item in self._file_list.selectedItems():
+            self._known_files.discard(item.text())
             self._file_list.takeItem(self._file_list.row(item))
 
     def _has_file(self, path: str) -> bool:
-        for i in range(self._file_list.count()):
-            if self._file_list.item(i).text() == path:
-                return True
-        return False
+        return path in self._known_files
+
+    def _clear_all(self):
+        self._file_list.clear()
+        self._known_files.clear()
 
     def _get_all_files(self) -> list[str]:
         return [

@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -34,6 +34,7 @@ import config
 from core.classifier import classify
 from core.everything import EverythingError, get_sdk
 from gui.widgets import ZoomableTree
+import gui.theme as theme
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +80,13 @@ class PskPickerPanel(QWidget):
         self._current_game_folder: str = ""      # detect game folder switches
         self._worker: PskSearchWorker | None = None
 
+        # Debounce filter-driven tree rebuilds — typing triggers up to ~10
+        # rebuilds/sec on a 40k-asset folder otherwise.
+        self._filter_debounce = QTimer(self)
+        self._filter_debounce.setSingleShot(True)
+        self._filter_debounce.setInterval(150)
+        self._filter_debounce.timeout.connect(self._rebuild_tree)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -93,7 +101,7 @@ class PskPickerPanel(QWidget):
             "  -term         — file must NOT contain this term\n"
             "Multiple terms can be mixed, e.g.:  rig -lod -shadow"
         )
-        self._filter.textChanged.connect(self._rebuild_tree)
+        self._filter.textChanged.connect(self._schedule_rebuild)
         search_row.addWidget(self._filter, 1)
 
         self._adv_toggle = QPushButton("Advanced \u25b6")
@@ -119,7 +127,7 @@ class PskPickerPanel(QWidget):
             "  term1 term2   — path must contain ALL terms\n"
             "  -term         — path must NOT contain this term"
         )
-        self._folder_filter.textChanged.connect(self._rebuild_tree)
+        self._folder_filter.textChanged.connect(self._schedule_rebuild)
         adv_row1.addWidget(self._folder_filter, 3)
 
         adv_row1.addWidget(QLabel("Category:"))
@@ -287,6 +295,10 @@ class PskPickerPanel(QWidget):
     # Build tree
     # ------------------------------------------------------------------
 
+    def _schedule_rebuild(self):
+        """Coalesce rapid filter changes into a single tree rebuild."""
+        self._filter_debounce.start()
+
     def _rebuild_tree(self):
         self._tree.blockSignals(True)
         self._tree.clear()
@@ -385,8 +397,9 @@ class PskPickerPanel(QWidget):
                         Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
                     )
                     if pkey in self._processed_paths:
-                        leaf.setForeground(0, QColor(100, 180, 255))
-                        leaf.setForeground(1, QColor(100, 180, 255))
+                        processed_color = QColor(theme.current_scheme()["status_processing"])
+                        leaf.setForeground(0, processed_color)
+                        leaf.setForeground(1, processed_color)
 
                     self._item_to_idx[id(leaf)] = file_idx
 

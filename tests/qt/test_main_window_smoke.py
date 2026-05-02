@@ -38,12 +38,27 @@ def test_main_window_creates_log_viewer(main_window):
 
 
 def test_menu_actions_present(main_window):
+    # Menu titles include `&` mnemonics; strip them for the comparison.
     menu_titles = [
-        a.menu().title() for a in main_window.menuBar().actions() if a.menu()
+        a.menu().title().replace("&", "")
+        for a in main_window.menuBar().actions() if a.menu()
     ]
     assert "File" in menu_titles
     assert "Tools" in menu_titles
+    assert "Help" in menu_titles
     assert "Window" in menu_titles
+
+
+def test_help_menu_has_setup_wizard_action(main_window):
+    """Help → Run Setup Wizard... should re-arm the wizard."""
+    help_menu = None
+    for a in main_window.menuBar().actions():
+        if a.menu() and a.menu().title().replace("&", "") == "Help":
+            help_menu = a.menu()
+            break
+    assert help_menu is not None
+    titles = [a.text().replace("&", "") for a in help_menu.actions() if a.text()]
+    assert any("Setup Wizard" in t for t in titles)
 
 
 def test_status_bar_initial_message(main_window):

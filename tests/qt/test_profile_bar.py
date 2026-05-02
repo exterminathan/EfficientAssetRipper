@@ -56,3 +56,15 @@ def test_set_current_updates_combo(qtbot, tmp_profiles_dir):
     bar.refresh()
     bar.set_current("Y")
     assert bar.current_profile() == "Y"
+
+
+def test_refresh_falls_back_to_first_profile_when_no_select(qtbot, tmp_profiles_dir):
+    """`refresh()` without `select` should populate `_active_profile` from list."""
+    pm = ProfileManager()
+    pm.create_profile("Alpha", {})
+    pm.create_profile("Beta", {})
+    bar = ProfileBar(pm)
+    qtbot.addWidget(bar)
+    bar.refresh()  # no select arg
+    assert bar._active_profile in ("Alpha", "Beta")
+    assert bar.current_profile() == bar._active_profile

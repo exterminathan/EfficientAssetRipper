@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import atexit
+import logging
 import shutil
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, Slot, QUrl
+from PySide6.QtCore import Qt, QRunnable, QThreadPool, Signal, Slot, QUrl
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -18,6 +20,35 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+log = logging.getLogger(__name__)
+
+
+class _RmTreeRunnable(QRunnable):
+    """Removes a directory tree on a background thread to avoid blocking the GUI."""
+
+    def __init__(self, path: Path, recreate: bool = False):
+        super().__init__()
+        self._path = Path(path)
+        self._recreate = recreate
+
+    def run(self):
+        try:
+            if self._path.exists():
+                shutil.rmtree(self._path, ignore_errors=True)
+            if self._recreate:
+                self._path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            log.exception("Background rmtree failed: %s", self._path)
+
+
+def _wipe_temp_dir(path: Path) -> None:
+    """atexit hook: remove temp dir, swallowing all errors."""
+    try:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def _fmt_time(ms: int) -> str:
@@ -39,6 +70,10 @@ class AudioPreviewerPanel(QWidget):
         super().__init__(parent)
         self._current_path: str = ""
         self._temp_dir = Path(tempfile.mkdtemp(prefix="ear_audio_preview_"))
+        # Last-resort cleanup on interpreter exit (covers crashes / SIGTERM).
+        atexit.register(_wipe_temp_dir, self._temp_dir)
+        # Debounce errorOccurred — Qt fires it multiple times per failed file.
+        self._last_error_msg: str = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -162,6 +197,7 @@ class AudioPreviewerPanel(QWidget):
         self._player_area.setVisible(True)
         self._name_label.setText(Path(path).name)
         self._status.setText("")
+        self._last_error_msg = ""
 
         self._player.stop()
         self._player.setSource(QUrl.fromLocalFile(path))
@@ -217,6 +253,10 @@ class AudioPreviewerPanel(QWidget):
 
     @Slot(QMediaPlayer.Error, str)
     def _on_error(self, error: QMediaPlayer.Error, message: str):
+        # Drop duplicate error storms (Qt fires errorOccurred repeatedly).
+        if message == self._last_error_msg:
+            return
+        self._last_error_msg = message
         self._status.setText(f"Playback error: {message}")
         self.log_message.emit(f"Audio preview error: {message}", "error")
 
@@ -250,9 +290,13 @@ class AudioPreviewerPanel(QWidget):
         return self._temp_dir
 
     def _clear_history(self):
+        # Stop playback and release the source so files in the temp dir
+        # aren't locked when we try to remove them on Windows.
         self._player.stop()
+        self._player.setSource(QUrl())
         self._recent_list.clear()
-        # Remove temp preview files
-        if self._temp_dir.exists():
-            shutil.rmtree(self._temp_dir, ignore_errors=True)
-            self._temp_dir.mkdir(parents=True, exist_ok=True)
+        # Remove temp preview files asynchronously so a slow filesystem
+        # doesn't freeze the UI.
+        QThreadPool.globalInstance().start(
+            _RmTreeRunnable(self._temp_dir, recreate=True)
+        )

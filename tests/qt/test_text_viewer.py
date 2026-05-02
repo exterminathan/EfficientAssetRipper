@@ -37,5 +37,6 @@ def test_search_highlights_match_count(qtbot):
     qtbot.addWidget(w)
     w.show_text("X", "alpha beta alpha gamma alpha")
     w._search.setText("alpha")
-    # _on_search runs as the slot for textChanged — match label should now reflect 3
-    assert "3" in w._match_label.text()
+    # The search is debounced via QTimer (150 ms); wait for the match-count
+    # label to reflect the result instead of relying on synchronous updates.
+    qtbot.waitUntil(lambda: "3" in w._match_label.text(), timeout=2000)

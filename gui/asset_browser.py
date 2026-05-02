@@ -11,7 +11,7 @@ import subprocess
 from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -161,9 +161,25 @@ class AssetDetailDialog(QDialog):
 
     @staticmethod
     def _open_blend(blend_path):
+        from PySide6.QtWidgets import QMessageBox
+
         blender_exe = config.get("blender_exe")
-        if blender_exe:
+        if not blender_exe:
+            QMessageBox.warning(
+                None, "Blender Not Configured",
+                "Set the Blender executable in Settings before opening .blend files.",
+            )
+            return
+        if not Path(blender_exe).is_file():
+            QMessageBox.warning(
+                None, "Blender Not Found",
+                f"Configured Blender path doesn't exist:\n{blender_exe}",
+            )
+            return
+        try:
             subprocess.Popen([blender_exe, str(blend_path)])
+        except OSError as e:
+            QMessageBox.warning(None, "Failed to launch Blender", str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +225,13 @@ class AssetBrowser(QWidget):
         self._assets: list[AssetEntry] = []
         self._item_to_idx: dict[int, int] = {}
 
+        # Debounce filter-driven tree rebuilds — typing triggers up to ~10
+        # rebuilds/sec on a 40k-asset folder otherwise.
+        self._filter_debounce = QTimer(self)
+        self._filter_debounce.setSingleShot(True)
+        self._filter_debounce.setInterval(150)
+        self._filter_debounce.timeout.connect(self._rebuild_tree)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -217,7 +240,7 @@ class AssetBrowser(QWidget):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Filter by name...")
-        self._search.textChanged.connect(self._rebuild_tree)
+        self._search.textChanged.connect(self._schedule_rebuild)
         search_row.addWidget(self._search, 1)
 
         self._adv_toggle = QPushButton("Advanced \u25b6")
@@ -303,6 +326,15 @@ class AssetBrowser(QWidget):
     def get_assets(self) -> list[AssetEntry]:
         """Return all loaded assets."""
         return list(self._assets)
+
+    @property
+    def assets(self) -> list[AssetEntry]:
+        """Public accessor for the underlying asset list (read-only by convention)."""
+        return self._assets
+
+    def _schedule_rebuild(self):
+        """Coalesce rapid filter changes into a single tree rebuild."""
+        self._filter_debounce.start()
 
     def get_selected_assets(self) -> list[AssetEntry]:
         """Return list of checked (ticked) assets."""
@@ -485,12 +517,15 @@ class AssetBrowser(QWidget):
     # ------------------------------------------------------------------
 
     def _on_double_click(self, index):
-        item = self._tree.currentItem()
+        # Prefer the QModelIndex argument over currentItem() so a true
+        # double-click reaches the correct row even if focus shifts.
+        item = self._tree.itemFromIndex(index) if index.isValid() else self._tree.currentItem()
         if item is None:
             return
         idx = self._item_to_idx.get(id(item))
         if idx is not None:
             dlg = AssetDetailDialog(self._assets[idx], parent=self)
+            dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             dlg.rescan_requested.connect(
                 lambda asset: self.rescan_requested.emit([asset])
             )
