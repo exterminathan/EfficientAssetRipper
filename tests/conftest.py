@@ -262,13 +262,22 @@ def mock_blender_run(monkeypatch):
     calls: list[dict] = []
     responses: list[BlenderResult] = []
 
-    def _stub(blender_exe, manifest, timeout=120, on_status=None):
+    def _stub(
+        blender_exe,
+        manifest,
+        timeout=120,
+        on_status=None,
+        cancel_check=None,
+        on_proc_started=None,
+    ):
         calls.append(
             {
                 "blender_exe": blender_exe,
                 "manifest": manifest,
                 "timeout": timeout,
                 "on_status": on_status,
+                "cancel_check": cancel_check,
+                "on_proc_started": on_proc_started,
             }
         )
         if responses:

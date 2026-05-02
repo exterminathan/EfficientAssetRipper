@@ -286,16 +286,29 @@ class EverythingSDK:
 
     # ------------------------------------------------------------------
     def find_props_file(
-        self, name: str, folder: str = ""
+        self, name: str, folder: str = "", max_results: int = 10_000
     ) -> list[Path]:
-        """Find a .props.txt file by name (without extension)."""
+        """Find a .props.txt file by name (without extension).
+
+        Default cap is 10k rather than 50; large UE5 projects routinely
+        register the same texture or master material under thousands of paths
+        and the closest-path tiebreaker can't pick the right one if the cap
+        sliced off the candidate it needed. We log a warning when the result
+        list hits the cap so an operator can investigate.
+        """
         parts: list[str] = []
         if folder:
             parts.append(f'path:"{_normalize_folder(folder)}"')
         # Use a filename search for exact match
         parts.append(f'wfn:"{name}.props.txt"')
         query = " ".join(parts)
-        raw = self.search(query, max_results=50)
+        raw = self.search(query, max_results=max_results)
+        if len(raw) >= max_results:
+            import logging
+            logging.getLogger(__name__).warning(
+                "find_props_file hit max_results=%d for %r — consider tightening folder scope",
+                max_results, name,
+            )
         return [Path(p) for p in raw]
 
 

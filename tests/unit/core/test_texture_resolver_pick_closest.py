@@ -33,16 +33,52 @@ def test_pick_closest_case_insensitive_match():
     assert chosen == a
 
 
-def test_pick_closest_tie_returns_first_seen():
-    """When candidates score equally, the first one wins."""
-    a = Path(r"D:\OtherDrive\X.tga")
-    b = Path(r"E:\YetAnother\X.tga")
-    ref = Path(r"F:\Nothing\In\Common.psk")
-    # No common prefix at all => both score 0; first wins.
-    assert _pick_closest_path([a, b], ref) is a
+def test_pick_closest_tie_breaks_deterministically():
+    """When candidates score equally, sort by (len(parts), str.lower())."""
+    # Same drive, same number of parts → string comparison.
+    a = Path(r"D:\Other\X.tga")
+    b = Path(r"E:\Other\X.tga")
+    ref = Path(r"F:\Nothing\Common.psk")
+    chosen = _pick_closest_path([a, b], ref)
+    # 'd:\\other\\x.tga' < 'e:\\other\\x.tga' lexicographically
+    assert chosen == a
+    # Reverse the input order — result must still be 'a'.
+    chosen2 = _pick_closest_path([b, a], ref)
+    assert chosen2 == a
 
 
-def test_pick_closest_with_empty_reference_returns_first():
+def test_pick_closest_tiebreak_prefers_shorter_path():
+    """Tied score → prefer the candidate with fewer path parts."""
+    short = Path(r"C:\one.tga")
+    deep = Path(r"C:\a\b\c\one.tga")
+    ref = Path(r"D:\Nothing\Else.psk")
+    chosen = _pick_closest_path([deep, short], ref)
+    assert chosen == short
+
+
+def test_pick_closest_with_empty_reference_picks_shortest_lex_first():
+    """Empty reference: deterministic by length then string."""
     a = Path(r"C:\X\one.tga")
     b = Path(r"C:\Y\two.tga")
-    assert _pick_closest_path([a, b], Path()) is a
+    chosen1 = _pick_closest_path([a, b], Path())
+    chosen2 = _pick_closest_path([b, a], Path())
+    assert chosen1 == chosen2 == a
+
+
+def test_pick_closest_stable_under_input_shuffle():
+    """Shuffling the candidate list must not change the pick."""
+    cands = [
+        Path(r"C:\Game\Char\Other\Tex.tga"),
+        Path(r"C:\Game\Char\Trooper\Tex.tga"),
+        Path(r"C:\Game\Other\Trooper\Tex.tga"),
+    ]
+    ref = Path(r"C:\Game\Char\Trooper\Mesh.psk")
+    expected = _pick_closest_path(list(cands), ref)
+    # Various shuffles
+    for order in (
+        [2, 0, 1],
+        [1, 2, 0],
+        [0, 2, 1],
+    ):
+        shuffled = [cands[i] for i in order]
+        assert _pick_closest_path(shuffled, ref) == expected

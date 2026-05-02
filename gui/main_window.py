@@ -29,6 +29,7 @@ from core.asset_scanner import (
     AssetScanner,
     load_scan_cache,
     save_scan_cache,
+    sweep_old_cache_backups,
 )
 from core.everything import EverythingError, get_sdk, reset_sdk
 from core.job_manager import JobManager
@@ -156,6 +157,13 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._maybe_run_setup_wizard()
         self._load_initial_profile()
+
+        # Best-effort startup housekeeping. Old scan-cache backups left behind
+        # by version-bump renames pile up otherwise.
+        try:
+            sweep_old_cache_backups()
+        except Exception:
+            log.exception("sweep_old_cache_backups failed (non-fatal)")
 
         # Kick off the auto-update check 2s after launch so it never delays
         # the splash. UpdateChecker fails silently on any error.

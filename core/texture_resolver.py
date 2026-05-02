@@ -41,13 +41,24 @@ class TextureResolution:
 
 
 def _pick_closest_path(candidates: list[Path], reference: Path) -> Path:
-    """Pick the candidate sharing the longest common path prefix with reference."""
+    """Pick the candidate sharing the longest common path prefix with reference.
+
+    Ties are broken deterministically by ``(len(parts), str(c).lower())`` so
+    that scan order or filesystem enumeration order does not change the
+    result.
+    """
     if len(candidates) == 1:
         return candidates[0]
 
     ref_parts = reference.parts
-    best = candidates[0]
-    best_score = 0
+
+    # No reference to compare against — pick the shortest/lexicographically-first.
+    if not ref_parts:
+        return sorted(
+            candidates, key=lambda c: (len(c.parts), str(c).lower())
+        )[0]
+
+    scored: list[tuple[int, Path]] = []
     for c in candidates:
         score = 0
         for a, b in zip(c.parts, ref_parts):
@@ -55,31 +66,74 @@ def _pick_closest_path(candidates: list[Path], reference: Path) -> Path:
                 score += 1
             else:
                 break
-        if score > best_score:
-            best_score = score
-            best = c
-    return best
+        scored.append((score, c))
+
+    best_score = max(s for s, _ in scored)
+    tied = [c for s, c in scored if s == best_score]
+    if len(tied) == 1:
+        return tied[0]
+    return sorted(tied, key=lambda c: (len(c.parts), str(c).lower()))[0]
 
 
 def classify_texture(
-    texture_name: str, texture_slots: dict, param_name: str = "",
+    texture_name: str,
+    texture_slots: dict,
+    param_name: str = "",
+    priority_order: Optional[list[str]] = None,
 ) -> Optional[tuple[str, dict]]:
     """Determine which slot a texture name belongs to.
 
-    Checks suffix matching first, then falls back to matching the
-    ParameterInfo Name from the props file against param_names lists.
+    Suffix matching wins by *longest matching suffix* across all slots, so
+    `_ORM` always beats `_OR` regardless of dict iteration order. Within a
+    slot, suffixes are also sorted by descending length for the same reason.
+    Ties (equal-length suffixes in different slots) are broken by
+    `priority_order`; slots not listed in `priority_order` fall through in
+    stable dict order.
+
+    The param_name fallback (e.g. ``BaseColor`` from ``TextureParameterValues``)
+    runs only when no suffix matches. It walks slots in `priority_order` too.
 
     Returns (slot_name, slot_config) or None if nothing matches.
     """
     name_upper = texture_name.rstrip("_").upper()
-    # Pass 1: suffix matching
+
+    # Build the slot ordering once: priority_order entries first, then any
+    # unlisted slots in stable dict order.
+    ordered_slots: list[str] = []
+    if priority_order:
+        for s in priority_order:
+            if s in texture_slots and s not in ordered_slots:
+                ordered_slots.append(s)
+    for s in texture_slots:
+        if s not in ordered_slots:
+            ordered_slots.append(s)
+    slot_priority = {name: idx for idx, name in enumerate(ordered_slots)}
+
+    # Pass 1: longest matching suffix wins; tiebreak by priority_order
+    best: Optional[tuple[int, int, str, dict]] = None
     for slot_name, slot_cfg in texture_slots.items():
-        for suffix in slot_cfg.get("suffixes", []):
+        suffixes = sorted(
+            slot_cfg.get("suffixes", []), key=lambda s: -len(s)
+        )
+        for suffix in suffixes:
+            if not suffix:
+                continue
             if name_upper.endswith(suffix.upper()):
-                return slot_name, slot_cfg
+                # Sort key: longer suffix preferred (negative len),
+                # lower priority index preferred.
+                key = (-len(suffix), slot_priority.get(slot_name, 1 << 30))
+                if best is None or key < (best[0], best[1]):
+                    best = (key[0], key[1], slot_name, slot_cfg)
+                break  # only the longest suffix in this slot matters
+    if best is not None:
+        return best[2], best[3]
+
     # Pass 2: param_name matching (e.g. ParameterInfo Name = "BaseColor")
     if param_name:
-        for slot_name, slot_cfg in texture_slots.items():
+        for slot_name in ordered_slots:
+            slot_cfg = texture_slots.get(slot_name)
+            if slot_cfg is None:
+                continue
             for pn in slot_cfg.get("param_names", []):
                 if param_name == pn:
                     return slot_name, slot_cfg
@@ -94,7 +148,7 @@ def resolve_textures(
     material_name: str = "",
     reference_path: Optional[Path] = None,
     game_folder: str = "",
-    param_name_map: Optional[dict[str, str]] = None,
+    param_name_map: Optional[dict[str, list[str]] | dict[str, str]] = None,
 ) -> TextureResolution:
     """Resolve a list of texture names to classified, located files.
 
@@ -106,13 +160,26 @@ def resolve_textures(
         material_name: Material name for checking overrides
         reference_path: Path of the source PSK, used for closest-match logic
         game_folder: Scope Everything searches to this folder
-        param_name_map: Optional dict mapping texture_name -> ParameterInfo Name
+        param_name_map: Optional dict mapping ``texture_name`` to either a
+            single ParameterInfo Name (legacy, ``str``) or to a list of names
+            (current — UE materials often bind the same texture to several
+            parameters and the right one for slot classification can be any of
+            them).
     """
     resolved: list[ResolvedTexture] = []
     unresolved: list[UnresolvedTexture] = []
 
-    if param_name_map is None:
-        param_name_map = {}
+    # Normalize the param_name_map to texture_name -> list[str].
+    norm_param_names: dict[str, list[str]] = {}
+    if param_name_map:
+        for tex_name, value in param_name_map.items():
+            if isinstance(value, str):
+                if value:
+                    norm_param_names[tex_name] = [value]
+            elif isinstance(value, (list, tuple)):
+                names = [v for v in value if v]
+                if names:
+                    norm_param_names[tex_name] = list(names)
 
     # Global ignore list (exact name) and ignore patterns (substring)
     ignore_textures = set(
@@ -135,6 +202,7 @@ def resolve_textures(
         return TextureResolution(resolved, unresolved, preset_name)
 
     texture_slots = preset["texture_slots"]
+    priority_order = preset.get("priority_order") or []
 
     # If override forces specific textures, apply those
     force_textures: dict[str, str] = {}
@@ -171,8 +239,10 @@ def resolve_textures(
         if any(pat in name_up for pat in ignore_patterns):
             continue
 
-        pname = param_name_map.get(tex_name, "")
-        result = classify_texture(tex_name, texture_slots, param_name=pname)
+        pnames = norm_param_names.get(tex_name, [])
+        result = _classify_with_param_names(
+            tex_name, texture_slots, pnames, priority_order
+        )
         if result is None:
             unresolved.append(UnresolvedTexture(tex_name, "no_matching_suffix"))
             continue
@@ -198,3 +268,41 @@ def resolve_textures(
         filled_slots.add(slot_name)
 
     return TextureResolution(resolved, unresolved, preset_name)
+
+
+def _classify_with_param_names(
+    tex_name: str,
+    texture_slots: dict,
+    param_names: list[str],
+    priority_order: list[str],
+) -> Optional[tuple[str, dict]]:
+    """Try suffix-based classification first, then walk all bound param_names.
+
+    A texture can be bound to several material parameters at once (e.g. the
+    same image used as both ``BaseColor`` and ``Diffuse``). The suffix
+    classifier already handles the common case; the param_name fallback walks
+    each bound name in turn so we don't accidentally drop the only signal we
+    have for a textureless suffix like ``T_Foo`` bound to ``BaseColor``.
+    """
+    # Suffix-only first (no param_name) so we never let a stale bind override
+    # an unambiguous suffix match.
+    suffix_match = classify_texture(
+        tex_name, texture_slots, priority_order=priority_order
+    )
+    if suffix_match is not None:
+        return suffix_match
+
+    seen: set[str] = set()
+    for pname in param_names:
+        if not pname or pname in seen:
+            continue
+        seen.add(pname)
+        match = classify_texture(
+            tex_name,
+            texture_slots,
+            param_name=pname,
+            priority_order=priority_order,
+        )
+        if match is not None:
+            return match
+    return None

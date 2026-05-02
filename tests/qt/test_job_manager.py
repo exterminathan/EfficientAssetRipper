@@ -252,3 +252,48 @@ def test_cancel_stops_after_current_asset(qtbot, mock_blender_run, tmp_path):
     _start_and_wait(qtbot, jm)
     # No assets should have been processed
     assert len(jm.results) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.6: asset_updated signal + Phase 2.7: cancel_check plumbing
+# ---------------------------------------------------------------------------
+
+def test_asset_updated_signal_emits_state_dict_on_success(
+    qtbot, mock_blender_run, tmp_path
+):
+    """On a successful run the worker thread should emit asset_updated
+    instead of relying solely on direct AssetEntry mutation."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    jm = JobManager(
+        assets=[_entry("A")],
+        blender_exe="fake-blender",
+        output_dir=str(output_dir),
+        addon_name="addon.x",
+    )
+    received: list[tuple[int, dict]] = []
+    jm.asset_updated.connect(lambda i, s: received.append((i, dict(s))))
+    _start_and_wait(qtbot, jm)
+    assert len(received) == 1
+    idx, state = received[0]
+    assert idx == 0
+    assert state["processed"] is True
+    assert state["blend_path"].name == "A.blend"
+
+
+def test_run_blender_called_with_cancel_check(qtbot, mock_blender_run, tmp_path):
+    """JobManager should pass a `cancel_check` callable into run_blender."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    jm = JobManager(
+        assets=[_entry("A")],
+        blender_exe="fake-blender",
+        output_dir=str(output_dir),
+        addon_name="addon.x",
+    )
+    _start_and_wait(qtbot, jm)
+    call = mock_blender_run["calls"][0]
+    assert callable(call["cancel_check"])
+    assert callable(call["on_proc_started"])
+    # Initially not cancelled.
+    assert call["cancel_check"]() is False

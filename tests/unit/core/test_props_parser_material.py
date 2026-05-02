@@ -157,3 +157,79 @@ def test_parse_material_props_text_scalar_params_legacy(fixtures_dir: Path):
     text = (fixtures_dir / "props" / "material_legacy.props.txt").read_text()
     result = parse_material_props(text)
     assert result.scalar_params.get("RoughnessAdjust") == pytest.approx(0.42)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.2 — robust property parsers
+# ---------------------------------------------------------------------------
+
+def test_parse_material_props_text_color_block_alpha_defaults_to_one():
+    """Legacy text parser must accept a color block missing A= and default 1.0."""
+    text = """
+VectorParameterValues[0] =
+{
+   ParameterInfo = { Name=NoAlphaTint }
+   ParameterValue = { R=0.1, G=0.2, B=0.3 }
+}
+"""
+    result = parse_material_props(text)
+    assert "NoAlphaTint" in result.color_tints
+    r, g, b, a = result.color_tints["NoAlphaTint"]
+    assert (r, g, b) == pytest.approx((0.1, 0.2, 0.3))
+    assert a == pytest.approx(1.0)
+
+
+def test_parse_material_props_text_color_block_channels_in_any_order():
+    """Color channels can appear in any order; parser must not lock to RGBA."""
+    text = """
+VectorParameterValues[0] =
+{
+   ParameterInfo = { Name=ReorderTint }
+   ParameterValue = { B=0.3, A=0.5, R=0.1, G=0.2 }
+}
+"""
+    result = parse_material_props(text)
+    assert result.color_tints["ReorderTint"] == pytest.approx((0.1, 0.2, 0.3, 0.5))
+
+
+def test_parse_material_props_json_color_alpha_defaults_to_one():
+    """JSON parser also fills missing A=1.0."""
+    text = """
+{
+  "Properties": {
+    "VectorParameterValues": [
+      {
+        "ParameterInfo": {"Name": "NoAlpha"},
+        "ParameterValue": {"R": 0.5, "G": 0.5, "B": 0.5}
+      }
+    ]
+  }
+}
+"""
+    result = parse_material_props(text)
+    assert result.color_tints.get("NoAlpha") == pytest.approx((0.5, 0.5, 0.5, 1.0))
+
+
+def test_parse_material_props_text_two_sided_strict_lower_compare():
+    """`TwoSided = TrueColor` must not be misread as a True boolean."""
+    text = "TwoSided = TrueColor\n"
+    result = parse_material_props(text)
+    assert result.is_two_sided is False
+
+
+def test_parse_material_props_text_b_is_masked_strict_compare():
+    text = "bIsMasked = false\n"
+    result = parse_material_props(text)
+    assert result.is_masked is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.1 — JSONDecodeError specific path falls back cleanly
+# ---------------------------------------------------------------------------
+
+def test_parse_material_props_json_malformed_falls_back_to_text():
+    """Malformed JSON should not raise — text parser takes over."""
+    text = '{"this is not": valid json,\nTexture2D\'/Game/X/T_Y.T_Y\''
+    result = parse_material_props(text)
+    # Text parser should still find the Texture2D ref.
+    assert any(t.texture_name == "T_Y" for t in result.textures)

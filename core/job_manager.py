@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -31,6 +33,11 @@ class JobManager(QThread):
     job_progress = Signal(int, str, str)    # (index, asset_name, step)
     queue_finished = Signal(int, int, int)  # (total, succeeded, failed)
     log_message = Signal(str, str)          # (message, level: info/warning/error/success)
+    # Emitted when an asset's processed-state changes mid-batch. The receiver
+    # is expected to apply the mutation on the GUI thread (and notify any
+    # connected QAbstractItemModel via dataChanged), instead of relying on
+    # the worker thread mutating shared AssetEntry instances directly.
+    asset_updated = Signal(int, object)     # (index, state_dict)
 
     def __init__(
         self,
@@ -49,9 +56,23 @@ class JobManager(QThread):
         self._timeout = timeout
         self._cancelled = False
         self._results: list[BlenderResult] = []
+        # Tracks the currently-running Blender subprocess so cancel() can
+        # terminate it directly instead of letting the timeout run out.
+        self._active_proc: Optional[subprocess.Popen] = None
+        self._proc_lock = threading.Lock()
 
     def cancel(self):
         self._cancelled = True
+        # If there's a live subprocess, kick it now — otherwise cancel only
+        # takes effect at the next loop boundary, which can be many minutes
+        # away when timeouts are large.
+        with self._proc_lock:
+            proc = self._active_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
 
     @property
     def results(self) -> list[BlenderResult]:
@@ -100,18 +121,38 @@ class JobManager(QThread):
                 step = status.get("step", status.get("status", ""))
                 self.job_progress.emit(_idx, _name, step)
 
+            # Track the live subprocess so cancel() can terminate it directly.
+            def on_proc_started(proc, _self=self):
+                with _self._proc_lock:
+                    _self._active_proc = proc
+
             # Run Blender
-            result = run_blender(
-                blender_exe=self._blender_exe,
-                manifest=manifest,
-                timeout=self._timeout,
-                on_status=on_status,
-            )
+            try:
+                result = run_blender(
+                    blender_exe=self._blender_exe,
+                    manifest=manifest,
+                    timeout=self._timeout,
+                    on_status=on_status,
+                    cancel_check=lambda: self._cancelled,
+                    on_proc_started=on_proc_started,
+                )
+            finally:
+                with self._proc_lock:
+                    self._active_proc = None
 
             self._results.append(result)
 
             if result.success:
                 succeeded += 1
+                # Defer the AssetEntry mutation to the GUI thread via signal —
+                # the worker thread should not be writing to shared model
+                # state directly. We still fall back to writing here so
+                # callers that don't connect asset_updated keep working.
+                state = {
+                    "blend_path": Path(output_path),
+                    "processed": True,
+                }
+                self.asset_updated.emit(idx, state)
                 asset.blend_path = Path(output_path)
                 asset.processed = True
                 self.log_message.emit(

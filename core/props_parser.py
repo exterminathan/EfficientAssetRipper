@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -68,31 +72,41 @@ _PARENT_RE = re.compile(
 )
 
 
+_VALID_OBJ_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _extract_asset_name(asset_path: str) -> str:
     """Extract the short name from a UE asset path.
 
     '/Game/Foo/Bar/M_Name.M_Name'  -> 'M_Name'
     '/Game/Foo/Bar/Package.SubAsset' -> 'SubAsset'
     '/Game/Foo/Bar/MI_Beetle.0'    -> 'MI_Beetle'  (numeric export index)
+
+    Splitting only on the *last* dot avoids mangling names that contain dots
+    (rare, but seen in DLC packages). The trailing token has to look like a
+    plain identifier or be a pure-ASCII digit string (export index); anything
+    else is returned as-is so we never silently drop a weird suffix.
     """
     # Take the part after the last /
     tail = asset_path.rsplit("/", 1)[-1]
-    # UE format is Package.ObjectName — the object name is the actual asset
-    if "." in tail:
-        parts = tail.split(".")
-        obj_name = parts[-1]
-        # If the suffix is a numeric export index, use the package name instead
-        if obj_name.isdigit():
-            return parts[0]
+    if "." not in tail:
+        return tail
+    package, _, obj_name = tail.rpartition(".")
+    # Numeric export index → fall back to package name.
+    if obj_name and obj_name.isascii() and obj_name.isdigit():
+        return package
+    if _VALID_OBJ_NAME_RE.match(obj_name):
         return obj_name
-    return tail
+    # Suffix doesn't look like a real identifier; return as-is so we still
+    # produce *something* — silently dropping characters has bitten us before.
+    return obj_name
 
 
 # ---------------------------------------------------------------------------
 # Mesh props parser
 # ---------------------------------------------------------------------------
 
-def parse_mesh_props(text: str) -> MeshProps:
+def parse_mesh_props(text: str, *, source: str = "<string>") -> MeshProps:
     """Parse a mesh .props.txt file and extract material references.
 
     Handles both JSON format (exported by CUE4Parse CLI) and the legacy
@@ -107,8 +121,16 @@ def parse_mesh_props(text: str) -> MeshProps:
     if stripped.startswith(("{", "[")):
         try:
             return _parse_mesh_props_json(stripped)
+        except json.JSONDecodeError as e:
+            log.warning(
+                "Malformed mesh-props JSON in %s line %d: %s — falling back to text parser",
+                source, e.lineno, e.msg,
+            )
         except Exception:
-            pass  # malformed JSON — fall through to text parser
+            log.exception(
+                "Unexpected mesh-props JSON parse failure in %s — falling back",
+                source,
+            )
 
     return _parse_mesh_props_text(text)
 
@@ -284,7 +306,7 @@ def _parse_materials_array(text: str) -> list[MaterialRef]:
 # Material props parser
 # ---------------------------------------------------------------------------
 
-def parse_material_props(text: str) -> MaterialProps:
+def parse_material_props(text: str, *, source: str = "<string>") -> MaterialProps:
     """Parse a material .props.txt and extract texture references + flags.
 
     Supports both JSON format (CUE4Parse CLI output) and legacy UE text format.
@@ -293,8 +315,16 @@ def parse_material_props(text: str) -> MaterialProps:
     if stripped.startswith(("{", "[")):
         try:
             return _parse_material_props_json(stripped)
+        except json.JSONDecodeError as e:
+            log.warning(
+                "Malformed material-props JSON in %s line %d: %s — falling back to text parser",
+                source, e.lineno, e.msg,
+            )
         except Exception:
-            pass  # malformed JSON — fall through to text parser
+            log.exception(
+                "Unexpected material-props JSON parse failure in %s — falling back",
+                source,
+            )
 
     return _parse_material_props_text(text)
 
@@ -380,11 +410,15 @@ def _parse_material_props_json(text: str) -> MaterialProps:
                 if not isinstance(val, dict) or not name:
                     continue
                 try:
+                    # R/G/B must be present; A defaults to 1.0 (UE often
+                    # omits alpha for opaque colour tints).
+                    if any(k not in val for k in ("R", "G", "B")):
+                        continue
                     result.color_tints[name] = (
-                        float(val.get("R", 0)),
-                        float(val.get("G", 0)),
-                        float(val.get("B", 0)),
-                        float(val.get("A", 1)),
+                        float(val["R"]),
+                        float(val["G"]),
+                        float(val["B"]),
+                        float(val.get("A", 1.0)),
                     )
                 except (ValueError, TypeError):
                     pass
@@ -477,11 +511,14 @@ def _parse_material_props_text(text: str) -> MaterialProps:
                     )
                 last_param_name = ""
 
-        # Boolean flags
+        # Boolean flags. Use partition+exact-compare so we don't misread
+        # a value of e.g. ``TrueColor`` as boolean True.
         elif stripped.startswith("TwoSided"):
-            result.is_two_sided = "true" in stripped.lower()
+            _, _, val = stripped.partition("=")
+            result.is_two_sided = val.strip().lower() == "true"
         elif stripped.startswith("bIsMasked"):
-            result.is_masked = "true" in stripped.lower()
+            _, _, val = stripped.partition("=")
+            result.is_masked = val.strip().lower() == "true"
         elif stripped.startswith("BlendMode"):
             _, _, val = stripped.partition("=")
             result.blend_mode = val.strip()
@@ -533,29 +570,43 @@ def _parse_vector_params(text: str, result: MaterialProps):
     then pair each ParameterInfo Name with the ParameterValue in the same
     inner block so that scalar parameters can't bleed across.
     """
-    # Find each individual VectorParameterValues[N] = { ... } inner block
+    # Find each individual VectorParameterValues[N] = { ... } inner block.
+    # Channel order can vary (and A is sometimes omitted), so we parse the
+    # brace block into a dict instead of locking to "R,G,B,A".
     for block_m in re.finditer(
         r"VectorParameterValues\[\d+\]\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}",
         text,
     ):
         block = block_m.group(1)
         name_m = re.search(r"ParameterInfo\s*=\s*\{\s*Name=([^}\s]+)", block)
-        val_m = re.search(
-            r"ParameterValue\s*=\s*\{\s*R=([\d.eE+-]+),\s*G=([\d.eE+-]+),"
-            r"\s*B=([\d.eE+-]+),\s*A=([\d.eE+-]+)\s*\}",
-            block,
+        val_block_m = re.search(
+            r"ParameterValue\s*=\s*\{([^{}]*)\}", block
         )
-        if name_m and val_m:
+        if name_m and val_block_m:
             name = name_m.group(1).strip()
-            try:
-                result.color_tints[name] = (
-                    float(val_m.group(1)),
-                    float(val_m.group(2)),
-                    float(val_m.group(3)),
-                    float(val_m.group(4)),
-                )
-            except ValueError:
-                pass
+            channels = _parse_color_channels(val_block_m.group(1))
+            if channels is not None:
+                result.color_tints[name] = channels
+
+
+def _parse_color_channels(text: str) -> Optional[tuple[float, float, float, float]]:
+    """Parse ``R=.., G=.., B=.., [A=..]`` from a brace block in any order.
+
+    Missing ``A`` defaults to 1.0. Returns ``None`` if R/G/B are missing or
+    a value isn't parseable as a float.
+    """
+    pairs = re.findall(r"([RGBA])\s*=\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)", text)
+    if not pairs:
+        return None
+    by_chan: dict[str, float] = {}
+    for chan, val in pairs:
+        try:
+            by_chan[chan] = float(val)
+        except ValueError:
+            return None
+    if not all(c in by_chan for c in "RGB"):
+        return None
+    return (by_chan["R"], by_chan["G"], by_chan["B"], by_chan.get("A", 1.0))
 
 
 def _parse_scalar_params(text: str, result: MaterialProps):
@@ -583,10 +634,12 @@ def _parse_scalar_params(text: str, result: MaterialProps):
 # ---------------------------------------------------------------------------
 
 def parse_mesh_props_file(path: Path) -> MeshProps:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return parse_mesh_props(text)
+    # utf-8-sig strips a BOM if present — some game exports include one and
+    # the leading ﻿ would otherwise break the ``startswith({|[)`` test.
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    return parse_mesh_props(text, source=str(path))
 
 
 def parse_material_props_file(path: Path) -> MaterialProps:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return parse_material_props(text)
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    return parse_material_props(text, source=str(path))

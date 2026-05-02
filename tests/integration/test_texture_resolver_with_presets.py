@@ -157,3 +157,79 @@ def test_resolve_textures_no_matching_suffix_marked_unresolved(presets):
     )
     assert len(res.unresolved) == 1
     assert res.unresolved[0].reason == "no_matching_suffix"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: list-of-param-names — duplicate bindings shouldn't be lost
+# ---------------------------------------------------------------------------
+
+def test_resolve_textures_param_name_list_falls_back_per_binding(presets):
+    """A textureless suffix that's only identifiable by one of several
+    parameter bindings must classify via the matching one."""
+    sdk = FakeEverythingSDK(textures={
+        "T_NoSuffix": [Path(r"C:\Game\T_NoSuffix.tga")],
+    })
+    res = resolve_textures(
+        texture_names=["T_NoSuffix"],
+        presets_data=presets,
+        sdk=sdk,
+        # The texture is bound to BOTH `RandomThing` (won't match) and
+        # `BaseColor` (matches base_color slot). We must not drop the second.
+        param_name_map={"T_NoSuffix": ["RandomThing", "BaseColor"]},
+    )
+    assert len(res.resolved) == 1
+    assert res.resolved[0].slot == "base_color"
+
+
+def test_resolve_textures_legacy_str_param_name_still_supported(presets):
+    """The old `dict[str, str]` shape stays compatible (single binding)."""
+    sdk = FakeEverythingSDK(textures={
+        "T_NoSuffix": [Path(r"C:\Game\T_NoSuffix.tga")],
+    })
+    res = resolve_textures(
+        texture_names=["T_NoSuffix"],
+        presets_data=presets,
+        sdk=sdk,
+        param_name_map={"T_NoSuffix": "BaseColor"},
+    )
+    assert len(res.resolved) == 1
+    assert res.resolved[0].slot == "base_color"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1 (integration): priority_order from real preset shape
+# ---------------------------------------------------------------------------
+
+def test_resolve_textures_uses_priority_order_for_cross_slot_ties():
+    """priority_order from preset JSON should propagate into classification."""
+    presets = {
+        "version": 1,
+        "presets": {
+            "default_pbr": {
+                "priority_order": ["base_color", "alpha"],
+                "texture_slots": {
+                    "alpha": {
+                        "suffixes": ["_A"],
+                        "param_names": [],
+                        "colorspace": "Non-Color",
+                        "wiring": {"type": "direct", "target_input": "Alpha"},
+                    },
+                    "base_color": {
+                        "suffixes": ["_A"],   # same length as alpha
+                        "param_names": [],
+                        "colorspace": "sRGB",
+                        "wiring": {"type": "direct", "target_input": "Base Color"},
+                    },
+                },
+            }
+        },
+    }
+    sdk = FakeEverythingSDK(textures={"T_Foo_A": [Path(r"C:\Game\T_Foo_A.tga")]})
+    res = resolve_textures(
+        texture_names=["T_Foo_A"],
+        presets_data=presets,
+        sdk=sdk,
+    )
+    assert len(res.resolved) == 1
+    # priority_order placed base_color before alpha → it wins the tie.
+    assert res.resolved[0].slot == "base_color"

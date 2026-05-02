@@ -190,3 +190,76 @@ def test_save_then_load_roundtrip(tmp_path, monkeypatch):
     assert len(entries) == 1
     assert entries[0].name == "SK_Trooper"
     assert entries[0].materials[0].material_name == "MI_Trooper_Body"
+
+
+# ---------------------------------------------------------------------------
+# Cache version mismatch — rename + clean rebuild (Phase 2.1)
+# ---------------------------------------------------------------------------
+
+def test_load_scan_cache_renames_old_version_and_returns_none(tmp_path, monkeypatch):
+    """When the cached version doesn't match _CACHE_VERSION, the file gets
+    renamed to *.json.bak.<ts> and load returns None (forces a re-scan)."""
+    import core.asset_scanner as scanner_mod
+    monkeypatch.setattr(scanner_mod, "_DEFAULT_CACHE_DIR", tmp_path / "cache")
+    folder = r"C:\Games\Old"
+
+    # Save with the current version, then rewrite with a stale version.
+    e = _sample_entry()
+    cache_path = save_scan_cache([e], folder)
+    raw = json.loads(cache_path.read_text())
+    raw["version"] = _CACHE_VERSION + 99   # pretend an older schema
+    cache_path.write_text(json.dumps(raw))
+
+    result = load_scan_cache(folder)
+    assert result is None
+    # The original cache file should have been renamed.
+    assert not cache_path.is_file()
+    backups = list((tmp_path / "cache").glob("scan_*.json.bak.*"))
+    assert len(backups) == 1
+    # The backup's payload has the bumped version, intact.
+    assert json.loads(backups[0].read_text())["version"] == _CACHE_VERSION + 99
+
+
+def test_sweep_old_cache_backups_removes_stale(tmp_path, monkeypatch):
+    """Backups older than retention_days are deleted."""
+    import time
+    from core.asset_scanner import sweep_old_cache_backups
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    fresh = cache_dir / "scan_aaaa.json.bak.99999999"
+    stale = cache_dir / "scan_bbbb.json.bak.11111111"
+    fresh.write_text("{}")
+    stale.write_text("{}")
+    # Backdate the stale file by 60 days.
+    old_ts = time.time() - (60 * 86400)
+    import os
+    os.utime(stale, (old_ts, old_ts))
+
+    deleted = sweep_old_cache_backups(cache_dir, retention_days=30)
+    assert deleted == 1
+    assert fresh.is_file()
+    assert not stale.is_file()
+
+
+# ---------------------------------------------------------------------------
+# Cache: blend file deleted out-of-band flips processed back to False
+# ---------------------------------------------------------------------------
+
+def test_load_cache_flips_processed_off_when_blend_missing(tmp_path, monkeypatch):
+    """If processed=True was cached but the .blend has been deleted, the
+    auto-detect should flip it back to False so the asset becomes re-queueable.
+    """
+    import core.asset_scanner as scanner_mod
+    monkeypatch.setattr(scanner_mod, "_DEFAULT_CACHE_DIR", tmp_path / "cache")
+
+    blend_path = tmp_path / "deleted.blend"  # never created
+    e = _sample_entry()
+    e.blend_path = blend_path
+    e.processed = True
+    save_scan_cache([e], "TestGame")
+
+    loaded = load_scan_cache("TestGame")
+    assert loaded is not None
+    entries, _ = loaded
+    assert entries[0].processed is False

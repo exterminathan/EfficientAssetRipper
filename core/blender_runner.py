@@ -120,6 +120,8 @@ def run_blender(
     manifest: dict,
     timeout: int = 120,
     on_status: Optional[Callable[[dict], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    on_proc_started: Optional[Callable[["subprocess.Popen"], None]] = None,
 ) -> BlenderResult:
     """Run Blender in background mode to process a single asset.
 
@@ -128,6 +130,13 @@ def run_blender(
         manifest: Job manifest dict (will be written to temp JSON file)
         timeout: Max seconds to wait
         on_status: Optional callback for real-time status updates
+        cancel_check: Optional zero-arg callable that returns True when the
+            caller wants this run aborted. Polled while we wait on Blender;
+            on True we terminate the subprocess and return early instead of
+            letting the timeout run out.
+        on_proc_started: Optional callback invoked once with the live
+            ``subprocess.Popen`` so the caller can hold a reference and call
+            ``terminate()``/``kill()`` directly if needed.
     """
     asset_name = os.path.basename(manifest.get("psk_path", "unknown"))
     result = BlenderResult(success=False, asset_name=asset_name)
@@ -173,21 +182,33 @@ def run_blender(
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
 
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            result.timed_out = True
-            result.error_message = f"Blender timed out after {timeout}s"
+        if on_proc_started is not None:
+            try:
+                on_proc_started(proc)
+            except Exception:
+                log.exception("on_proc_started callback raised — ignoring")
+
+        cancelled, stdout, stderr = _wait_with_cancel(
+            proc, timeout=timeout, cancel_check=cancel_check
+        )
+        if cancelled:
+            result.return_code = proc.returncode if proc.returncode is not None else -1
+            result.error_message = "Cancelled by user"
             result.stdout = stdout
             result.stderr = stderr
+            log.info("Blender cancelled for %s", asset_name)
+            return result
+        if stdout is None:
+            # _wait_with_cancel signals timeout by returning (False, None, ...)
+            result.timed_out = True
+            result.error_message = f"Blender timed out after {timeout}s"
+            result.stderr = stderr or ""
             result.return_code = -1
             log.error("Blender timed out for %s", asset_name)
             return result
 
         result.stdout = stdout
-        result.stderr = stderr
+        result.stderr = stderr or ""
         result.return_code = proc.returncode
 
         # Parse structured status lines from stdout
@@ -227,6 +248,76 @@ def run_blender(
             pass
 
     return result
+
+
+def _wait_with_cancel(
+    proc: "subprocess.Popen",
+    timeout: int,
+    cancel_check: Optional[Callable[[], bool]],
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Wait for *proc* to exit, polling ``cancel_check`` along the way.
+
+    Returns ``(cancelled, stdout, stderr)``:
+
+    - ``cancelled=True`` — caller asked us to stop; subprocess has been
+      terminated/killed and pipes drained.
+    - ``cancelled=False, stdout=None`` — timeout elapsed; subprocess killed,
+      stderr is whatever drained.
+    - ``cancelled=False, stdout=str`` — normal exit; ``stdout``/``stderr``
+      are the full captured streams.
+    """
+    # Without a cancel callback the old simple path is still ideal — we don't
+    # need to spin in a poll loop for the common case.
+    if cancel_check is None:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _, stderr = proc.communicate()
+            return False, None, stderr
+        return False, stdout, stderr
+
+    poll_interval = 0.25
+    elapsed = 0.0
+    while True:
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate()
+            return False, stdout, stderr
+        if cancel_check():
+            stdout, stderr = _terminate_then_kill(proc)
+            return True, stdout, stderr
+
+        # Time-based timeout independent of clock skew.
+        if elapsed >= timeout:
+            proc.kill()
+            try:
+                _, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stderr = ""
+            return False, None, stderr
+
+        try:
+            proc.wait(timeout=poll_interval)
+        except subprocess.TimeoutExpired:
+            elapsed += poll_interval
+            continue
+        # If wait returned, the next loop iteration handles the exit.
+
+
+def _terminate_then_kill(proc: "subprocess.Popen") -> tuple[str, str]:
+    """Politely terminate, then kill after a 5s grace. Returns (stdout, stderr)."""
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    try:
+        return proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            return proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            return "", ""
 
 
 def _process_status(status: dict, result: BlenderResult):

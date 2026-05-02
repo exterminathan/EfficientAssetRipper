@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import struct
 import time
 from dataclasses import dataclass, field
@@ -30,6 +31,11 @@ from core.texture_resolver import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# Hard cap for parent-chain traversal. Real UE material chains rarely exceed
+# 4-5 levels; 32 is a generous safety net before we declare a cycle.
+MAX_PARENT_DEPTH = 32
 
 
 # ---------------------------------------------------------------------------
@@ -122,46 +128,132 @@ class AssetEntry:
 # PSK binary material extraction
 # ---------------------------------------------------------------------------
 
-def _extract_psk_materials(psk_path: Path) -> list[str]:
+# Known PSK/PSKX chunk IDs. Anything outside this set is logged at debug
+# level and skipped — older or game-specific exports may add custom chunks.
+_KNOWN_PSK_CHUNK_IDS = frozenset({
+    "ACTRHEAD",
+    "PNTS0000",
+    "VTXW0000",
+    "FACE0000",
+    "FACE3200",
+    "MATT0000",
+    "REFSKELT", "REFSKEL0",
+    "RAWWEIGHTS", "RAWW0000",
+    "VERTEXCOLOR",
+    "EXTRAUVS0", "EXTRAUVS1", "EXTRAUVS2", "EXTRAUVS3",
+    "MORPHTARGETS",
+    "MORPHNAMES",
+})
+
+# 100 MB hard ceiling on a single chunk's payload — anything larger is almost
+# certainly a corrupt/forged size word, not a legit huge mesh chunk.
+_MAX_PSK_CHUNK_BYTES = 100 * 1024 * 1024
+
+
+def _decode_material_name(raw: bytes) -> str:
+    """Decode a 64-byte material name slot from a PSK MATT chunk.
+
+    Tries UTF-8 strict, falls back to cp1252 (Windows default for older UE
+    exports), and finally ASCII with replacement characters. Logs a debug
+    message when fallback fires so localized-game weirdness is visible.
+    """
+    raw = raw[:64].split(b"\x00", 1)[0]
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        decoded = raw.decode("cp1252")
+        log.debug("PSK material name decoded via cp1252 fallback: %r", decoded)
+        return decoded
+    except UnicodeDecodeError:
+        decoded = raw.decode("ascii", errors="replace")
+        log.debug("PSK material name decoded via ASCII-replace: %r", decoded)
+        return decoded
+
+
+def _extract_psk_materials(psk_path: Path) -> tuple[list[str], bool]:
     """Read material names from the MATT0000 chunk in a PSK/PSKX file.
 
-    Returns a list of material name strings, or an empty list on failure.
+    Returns ``(names, ok)`` where ``ok=False`` signals that the file looks
+    truncated or otherwise malformed — distinct from "well-formed file with no
+    materials" (returns ``([], True)``). Callers can surface this as a
+    ``scan_failed`` status instead of silently classifying it as "no_materials".
     """
     try:
         data = psk_path.read_bytes()
     except (OSError, IOError) as e:
         log.warning("Could not read PSK file %s: %s", psk_path, e)
-        return []
+        return [], False
 
     names: list[str] = []
     offset = 0
     size = len(data)
     while offset < size:
         if offset + 32 > size:
-            break
+            # Trailing garbage shorter than a chunk header is malformed.
+            log.warning(
+                "PSK file %s truncated mid-header at offset %d/%d",
+                psk_path, offset, size,
+            )
+            return names, False
         chunk_id = data[offset:offset + 20].split(b"\x00")[0]
         try:
             chunk_id_str = chunk_id.decode("ascii")
         except UnicodeDecodeError:
-            break
+            log.warning(
+                "PSK file %s has non-ASCII chunk id at offset %d",
+                psk_path, offset,
+            )
+            return names, False
         dsize = struct.unpack_from("<I", data, offset + 24)[0]
         dcount = struct.unpack_from("<I", data, offset + 28)[0]
+
+        # Bound-check the declared payload before we trust dsize * dcount.
+        remaining = size - offset - 32
+        # Guard against multiplication overflow / absurd values.
+        if dsize > _MAX_PSK_CHUNK_BYTES or dcount > _MAX_PSK_CHUNK_BYTES:
+            log.warning(
+                "PSK file %s has implausible chunk dims at %s: dsize=%d dcount=%d",
+                psk_path, chunk_id_str, dsize, dcount,
+            )
+            return names, False
         chunk_bytes = dsize * dcount
+        if chunk_bytes > _MAX_PSK_CHUNK_BYTES or chunk_bytes > remaining:
+            log.warning(
+                "PSK file %s chunk %s overruns end (need %d, have %d)",
+                psk_path, chunk_id_str, chunk_bytes, remaining,
+            )
+            return names, False
 
         if chunk_id_str == "MATT0000":
+            if dsize < 64:
+                log.warning(
+                    "PSK file %s MATT chunk too small (dsize=%d)",
+                    psk_path, dsize,
+                )
+                return names, False
             chunk_data = data[offset + 32: offset + 32 + chunk_bytes]
             for i in range(dcount):
                 mat_data = chunk_data[i * dsize: (i + 1) * dsize]
-                mat_name = mat_data[:64].split(b"\x00")[0].decode(
-                    "ascii", errors="replace"
-                )
+                mat_name = _decode_material_name(mat_data)
                 if mat_name:
                     names.append(mat_name)
-            break  # found MATT chunk, no need to keep scanning
+            return names, True  # found MATT chunk, done
+
+        if chunk_id_str not in _KNOWN_PSK_CHUNK_IDS:
+            log.debug(
+                "PSK file %s: unknown chunk id %r at offset %d (skipping)",
+                psk_path, chunk_id_str, offset,
+            )
 
         offset += 32 + chunk_bytes
 
-    return names
+    # Reached EOF cleanly without finding MATT — file is well-formed but has
+    # no MATT chunk.
+    return names, True
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +299,13 @@ class AssetScanner:
         """
         self._cancelled = False
 
-        # Build lookup of already-cached entries by PSK path
-        existing = {str(e.psk_path): e for e in self._cache}
+        # Build lookup of already-cached entries by PSK path. Path strings
+        # come back from Everything in their on-disk casing, but Windows is
+        # case-insensitive — normalize to avoid duplicate cache entries when
+        # the casing drifts between scans.
+        existing = {
+            os.path.normcase(str(e.psk_path)): e for e in self._cache
+        }
         self._cache.clear()
 
         # 1. Find all PSK/PSKX files
@@ -230,7 +327,7 @@ class AssetScanner:
                 break
 
             # Reuse cached entry if it was already resolved
-            cached_entry = existing.get(str(psk_path))
+            cached_entry = existing.get(os.path.normcase(str(psk_path)))
             if cached_entry is not None and cached_entry.mesh_props_found:
                 self._cache.append(cached_entry)
                 if progress_callback:
@@ -287,9 +384,19 @@ class AssetScanner:
 
         mat_refs = mesh_props.materials
 
-        # Fallback: if props file has no materials, extract from PSK binary
+        # Fallback: if props file has no materials, extract from PSK binary.
+        # _extract_psk_materials now distinguishes "no materials" from "scan
+        # failed" — surface the latter via mesh_props_found=False so the GUI
+        # shows scan_failed instead of no_materials.
         if not mat_refs:
-            psk_mat_names = _extract_psk_materials(entry.psk_path)
+            psk_mat_names, ok = _extract_psk_materials(entry.psk_path)
+            if not ok:
+                log.warning(
+                    "PSK binary parse failed for %s — leaving as scan_failed",
+                    entry.psk_path,
+                )
+                entry.mesh_props_found = False
+                return
             if psk_mat_names:
                 log.info(
                     "Props for %s has no materials; extracted %d from PSK binary",
@@ -355,12 +462,15 @@ class AssetScanner:
         # Store parent reference for chain traversal
         mat_entry.parent_name = mat_props.parent_name
 
-        # Resolve textures
+        # Resolve textures.
+        # A texture name can be bound to multiple parameters in one material
+        # (e.g. the same image used as both BaseColor and Diffuse). Collect
+        # them all so the resolver can pick the best param_name for the slot.
         tex_names = [t.texture_name for t in mat_props.textures]
-        param_name_map = {
-            t.texture_name: t.param_name
-            for t in mat_props.textures if t.param_name
-        }
+        param_name_map: dict[str, list[str]] = {}
+        for t in mat_props.textures:
+            if t.param_name:
+                param_name_map.setdefault(t.texture_name, []).append(t.param_name)
         if not tex_names:
             # Even with no textures, store color tints/scalar params if available
             if mat_props.color_tints:
@@ -394,14 +504,29 @@ class AssetScanner:
     def _resolve_parent_chain(
         self, mat_entry: MaterialEntry, psk_path: Path, overrides: dict
     ):
-        """Trace parent material chain to find textures for a textureless material."""
-        visited: set[str] = {mat_entry.material_name}
+        """Trace parent material chain to find textures for a textureless material.
+
+        Walks up the parent chain until we find textures, hit a cycle, or
+        exceed ``MAX_PARENT_DEPTH``. Visited names are lower-cased so a
+        case-mixed cycle (``MI_Foo`` -> ``mi_foo``) is detected as such.
+        """
+        visited: set[str] = {mat_entry.material_name.lower()}
         child_color_tints = dict(mat_entry.color_tints)
         child_scalar_params = dict(mat_entry.scalar_params)
         current_parent = mat_entry.parent_name
+        depth = 0
 
-        while current_parent and current_parent not in visited:
-            visited.add(current_parent)
+        while current_parent and current_parent.lower() not in visited:
+            if depth >= MAX_PARENT_DEPTH:
+                log.warning(
+                    "Parent chain depth cap (%d) hit for %s; chain so far: %s",
+                    MAX_PARENT_DEPTH,
+                    mat_entry.material_name,
+                    " -> ".join(sorted(visited)),
+                )
+                return
+            visited.add(current_parent.lower())
+            depth += 1
             log.info(
                 "Material %s has no textures, tracing parent: %s",
                 mat_entry.material_name, current_parent,
@@ -433,10 +558,12 @@ class AssetScanner:
                 break
 
             tex_names = [t.texture_name for t in parent_props.textures]
-            param_name_map = {
-                t.texture_name: t.param_name
-                for t in parent_props.textures if t.param_name
-            }
+            param_name_map: dict[str, list[str]] = {}
+            for t in parent_props.textures:
+                if t.param_name:
+                    param_name_map.setdefault(t.texture_name, []).append(
+                        t.param_name
+                    )
 
             if tex_names:
                 # Found textures in this ancestor — resolve them
@@ -506,6 +633,7 @@ class AssetScanner:
 # ---------------------------------------------------------------------------
 
 _CACHE_VERSION = 1
+_CACHE_BAK_RETENTION_DAYS = 30
 from _base import base_dir as _base_dir
 
 _DEFAULT_CACHE_DIR = _base_dir() / "cache"
@@ -517,6 +645,34 @@ def _get_cache_path(game_folder: str) -> Path:
     import hashlib
     folder_hash = hashlib.md5(game_folder.encode()).hexdigest()[:12]
     return _DEFAULT_CACHE_DIR / f"scan_{folder_hash}.json"
+
+
+def sweep_old_cache_backups(
+    cache_dir: Optional[Path] = None,
+    retention_days: int = _CACHE_BAK_RETENTION_DAYS,
+) -> int:
+    """Delete ``scan_*.json.bak.*`` backups older than *retention_days*.
+
+    Run this on app startup so a long-running install never accumulates more
+    than a month of stale rename backups. Returns the count actually deleted
+    (best-effort — silent on individual delete failures).
+    """
+    cache_dir = cache_dir or _DEFAULT_CACHE_DIR
+    if not cache_dir.is_dir():
+        return 0
+    cutoff = time.time() - (retention_days * 86400)
+    deleted = 0
+    for path in cache_dir.glob("scan_*.json.bak.*"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                deleted += 1
+        except OSError as e:
+            log.debug("Could not sweep cache backup %s: %s", path, e)
+    if deleted:
+        log.info("Swept %d stale scan-cache backup(s) older than %d days",
+                 deleted, retention_days)
+    return deleted
 
 
 def _asset_to_dict(entry: AssetEntry) -> dict:
@@ -598,9 +754,17 @@ def _dict_to_asset(d: dict) -> AssetEntry:
     bp = d.get("blend_path")
     blend_path = Path(bp) if bp else None
     processed = d.get("processed", False)
-    # Auto-detect processed state from existing blend file on disk
-    if blend_path and not processed and blend_path.is_file():
-        processed = True
+    # Auto-detect processed state from the on-disk .blend so it stays in sync
+    # both ways: flip True if the blend showed up out-of-band (e.g. user
+    # manually exported), and flip False if it was deleted while we weren't
+    # looking. Asymmetric auto-detect would let stale processed=True linger
+    # forever after a cleanup.
+    if blend_path is not None:
+        on_disk = blend_path.is_file()
+        if on_disk and not processed:
+            processed = True
+        elif not on_disk and processed:
+            processed = False
     return AssetEntry(
         psk_path=Path(d["psk_path"]),
         name=d["name"],
@@ -638,8 +802,13 @@ def save_scan_cache(assets: list[AssetEntry], game_folder: str) -> Path:
 def load_scan_cache(game_folder: str) -> tuple[list[AssetEntry], float] | None:
     """Load cached scan results if available.
 
+    On version mismatch, the old cache file is renamed to
+    ``scan_<hash>.json.bak.<unix_ts>`` so the next save can write a clean
+    canonical file without losing the old payload. Backups are pruned by
+    :func:`sweep_old_cache_backups` on app startup.
+
     Returns:
-        (assets, timestamp) tuple, or None if no cache exists.
+        (assets, timestamp) tuple, or None if no usable cache exists.
     """
     cache_path = _get_cache_path(game_folder)
     if not cache_path.is_file():
@@ -649,8 +818,21 @@ def load_scan_cache(game_folder: str) -> tuple[list[AssetEntry], float] | None:
         with open(cache_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        if data.get("version") != _CACHE_VERSION:
-            log.warning("Cache version mismatch, ignoring")
+        version_found = data.get("version")
+        if version_found != _CACHE_VERSION:
+            log.warning(
+                "Scan cache version mismatch at %s (found=%r, expected=%r); "
+                "renaming and ignoring",
+                cache_path, version_found, _CACHE_VERSION,
+            )
+            try:
+                bak = cache_path.with_suffix(
+                    f".json.bak.{int(time.time())}"
+                )
+                cache_path.rename(bak)
+                log.info("Old cache renamed to %s", bak)
+            except OSError as e:
+                log.warning("Could not rename old cache file: %s", e)
             return None
 
         if data.get("game_folder") != game_folder:
