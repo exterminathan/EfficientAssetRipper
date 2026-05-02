@@ -1,9 +1,18 @@
 """Persistent application settings via QSettings."""
 
+from __future__ import annotations
+
 import json
+import logging
+import os
 from pathlib import Path
+from typing import Any
+
 from PySide6.QtCore import QSettings
+
 from _base import base_dir
+
+log = logging.getLogger(__name__)
 
 _DEFAULTS = {
     "game_folder": "",
@@ -13,6 +22,7 @@ _DEFAULTS = {
     "psk_addon_name": "bl_ext.blender_org.io_scene_psk_psa",
     "timeout_seconds": 120,
     "presets_path": str(base_dir() / "data" / "texture_presets.json"),
+    "presets_path_confirmed_external": "",
     "cue4parse_cli": "",
     "unpack_output_dir": "",
     "aes_keys": "[]",
@@ -41,6 +51,15 @@ def get_int(key: str) -> int:
     return int(_qs.value(key, _DEFAULTS.get(key, 0)))
 
 
+def get_raw(key: str) -> Any:
+    """Return the QSettings value preserving its native type.
+
+    Use this when callers need a list/bool/int and should not have a string
+    representation forced onto them. ``get`` continues to apply ``str(...)``.
+    """
+    return _qs.value(key, _DEFAULTS.get(key, ""))
+
+
 def set(key: str, value) -> None:  # noqa: A001
     _qs.setValue(key, value)
 
@@ -50,10 +69,83 @@ def get_presets_path() -> Path:
     return Path(p) if p else base_dir() / "data" / "texture_presets.json"
 
 
-def load_presets() -> dict:
-    path = get_presets_path()
-    with open(path, "r", encoding="utf-8") as f:
+def is_presets_path_safe(path: Path | str) -> bool:
+    """Return True if *path* is the bundled presets file (no prompt needed)."""
+    bundled_dir = (base_dir() / "data").resolve()
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(bundled_dir)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_presets_shape(payload: object) -> bool:
+    """Lightweight schema check for ``texture_presets.json``.
+
+    The full structure has many optional fields; we only insist on the
+    invariants the resolver actually depends on:
+
+    - top level is a dict
+    - ``presets`` exists and is a dict
+    - every preset is a dict with a ``texture_slots`` dict
+    - every slot is a dict (suffix/param_name lists are optional)
+    """
+    if not isinstance(payload, dict):
+        return False
+    presets = payload.get("presets")
+    if not isinstance(presets, dict):
+        return False
+    for preset in presets.values():
+        if not isinstance(preset, dict):
+            return False
+        slots = preset.get("texture_slots")
+        if not isinstance(slots, dict):
+            return False
+        for slot in slots.values():
+            if not isinstance(slot, dict):
+                return False
+    return True
+
+
+def _load_bundled_presets() -> dict:
+    bundled = base_dir() / "data" / "texture_presets.json"
+    with open(bundled, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_presets() -> dict:
+    """Load presets from the configured path, falling back to bundled defaults.
+
+    Falls back when the file is missing, unparseable, or fails the shape
+    check — never raises out to the caller. The fallback path keeps the
+    app usable even if a user hand-edits ``texture_presets.json`` into
+    something invalid.
+    """
+    path = get_presets_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        log.warning("texture_presets.json missing at %s; using bundled defaults", path)
+        return _load_bundled_presets()
+    except json.JSONDecodeError as e:
+        log.error("texture_presets.json is not valid JSON (%s); falling back", e)
+        return _load_bundled_presets()
+    except OSError as e:
+        log.error("texture_presets.json unreadable (%s); falling back", e)
+        return _load_bundled_presets()
+
+    if not _validate_presets_shape(payload):
+        log.error(
+            "texture_presets.json at %s failed shape validation; falling back",
+            path,
+        )
+        return _load_bundled_presets()
+    return payload
 
 
 def all_keys() -> list[str]:

@@ -6,8 +6,12 @@ fast file-name searches across all indexed volumes.
 
 import ctypes
 import ctypes.wintypes as wt
+import os
+import threading
 from pathlib import Path
 from typing import Optional
+
+from _base import base_dir
 
 # ---------------------------------------------------------------------------
 # Everything SDK constants
@@ -27,6 +31,9 @@ EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME = 0x00000004
 EVERYTHING_REQUEST_SIZE = 0x00000010
 
 EVERYTHING_SORT_NAME_ASCENDING = 1
+
+# LoadLibraryEx flag — restrict DLL search to System32 (no CWD/PATH planting)
+_LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
 
 _ERROR_MESSAGES = {
     EVERYTHING_ERROR_MEMORY: "Out of memory",
@@ -53,25 +60,71 @@ def _normalize_folder(folder: str) -> str:
     return folder.replace("/", "\\").rstrip("\\")
 
 
+def _default_dll_candidates() -> list[str]:
+    """Absolute candidate paths for Everything64.dll.
+
+    Sources, in priority order:
+    1. QSettings-configured `everything_dll`, if absolute.
+    2. The bundled `data/` directory next to the install (handy for portable installs).
+    3. The well-known voidtools install locations.
+
+    Bare filenames are deliberately excluded — passing one to ``WinDLL`` would
+    trigger the legacy DLL search order (CWD/PATH) and let an attacker plant a
+    malicious ``Everything64.dll`` next to the EXE.
+    """
+    candidates: list[str] = []
+    try:
+        import config  # local import to avoid a hard dep at module-load time
+        configured = config.get("everything_dll")
+        if configured and os.path.isabs(configured):
+            candidates.append(configured)
+    except Exception:  # noqa: BLE001 — config is optional
+        pass
+
+    bundled = base_dir() / "data" / "Everything64.dll"
+    candidates.append(str(bundled))
+    candidates.append(r"C:\Program Files\Everything\Everything64.dll")
+    candidates.append(r"C:\Program Files (x86)\Everything\Everything64.dll")
+    return candidates
+
+
+def _load_winddll(path: str):
+    """Load a DLL with LOAD_LIBRARY_SEARCH_SYSTEM32 to block planting."""
+    if not os.path.isabs(path):
+        raise OSError(f"refusing to load non-absolute DLL path: {path!r}")
+    try:
+        return ctypes.WinDLL(path, winmode=_LOAD_LIBRARY_SEARCH_SYSTEM32)
+    except TypeError:
+        # Python < 3.8 fallback (winmode unsupported); we still required abs path.
+        return ctypes.WinDLL(path)
+
+
 class EverythingSDK:
     """Thin ctypes interface to Everything64.dll."""
 
     def __init__(self, dll_path: Optional[str] = None):
         if dll_path:
-            self._dll = ctypes.WinDLL(dll_path)
+            if not os.path.isabs(dll_path):
+                raise EverythingError(
+                    f"Everything DLL path must be absolute (got {dll_path!r})"
+                )
+            try:
+                self._dll = _load_winddll(dll_path)
+            except OSError as e:
+                raise EverythingError(
+                    f"Could not load Everything DLL at {dll_path}: {e}"
+                ) from e
         else:
-            # Try common locations
-            for candidate in [
-                r"C:\Program Files\Everything\Everything64.dll",
-                r"C:\Program Files (x86)\Everything\Everything64.dll",
-                "Everything64.dll",
-            ]:
+            self._dll = None
+            for candidate in _default_dll_candidates():
+                if not os.path.isabs(candidate):
+                    continue
                 try:
-                    self._dll = ctypes.WinDLL(candidate)
+                    self._dll = _load_winddll(candidate)
                     break
                 except OSError:
                     continue
-            else:
+            if self._dll is None:
                 raise EverythingError(
                     "Could not find Everything64.dll. "
                     "Set the path in Settings or install Everything."
@@ -143,11 +196,19 @@ class EverythingSDK:
             self._check_error()
 
         count = self._dll.Everything_GetNumResults()
-        results: list[str] = []
-        buf = ctypes.create_unicode_buffer(1024)
+        # Defensive: never iterate beyond the requested cap (DLL has been
+        # known to return larger counts under unusual conditions).
+        if count > max_results:
+            count = max_results
 
+        results: list[str] = []
         for i in range(count):
-            self._dll.Everything_GetResultFullPathNameW(i, buf, 1024)
+            # Two-call pattern: query the buffer size, then allocate exactly.
+            needed = self._dll.Everything_GetResultFullPathNameW(i, None, 0)
+            if needed <= 0:
+                continue
+            buf = ctypes.create_unicode_buffer(needed + 1)
+            self._dll.Everything_GetResultFullPathNameW(i, buf, needed + 1)
             results.append(buf.value)
 
         return results
@@ -240,15 +301,39 @@ class EverythingSDK:
 
 # Singleton (lazily initialized)
 _instance: Optional[EverythingSDK] = None
+_instance_lock = threading.Lock()
 
 
 def get_sdk(dll_path: Optional[str] = None) -> EverythingSDK:
     global _instance
+    # Double-checked locking: avoid taking the lock on the hot path.
     if _instance is None:
-        _instance = EverythingSDK(dll_path)
+        with _instance_lock:
+            if _instance is None:
+                _instance = EverythingSDK(dll_path)
     return _instance
 
 
 def reset_sdk():
     global _instance
-    _instance = None
+    with _instance_lock:
+        old = _instance
+        _instance = None
+    if old is None:
+        return
+    # Drop the DLL handle so a stale path doesn't linger between settings changes.
+    try:
+        handle = getattr(old._dll, "_handle", None)
+        if handle:
+            import _ctypes  # type: ignore[attr-defined]
+            try:
+                _ctypes.FreeLibrary(handle)
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        try:
+            old._dll = None  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass

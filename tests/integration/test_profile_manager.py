@@ -117,3 +117,96 @@ def test_profile_exists(tmp_profiles_dir):
     assert pm.profile_exists("X") is False
     pm.create_profile("X", {})
     assert pm.profile_exists("X") is True
+
+
+# ---------------------------------------------------------------------------
+# Path-traversal hardening
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "evil_name",
+    [
+        "..\\evil",
+        "../evil",
+        "../../etc/passwd",
+        r"C:\Windows\System32\foo",  # absolute path masquerading as a name
+        "name/with/slash",
+        "name\\with\\backslash",
+        "name\x00null",              # NUL byte
+        "CON",                       # reserved Windows device names
+        "PRN",
+        "NUL",
+        "AUX",
+        "COM1",
+        "lpt9",                      # case-insensitive
+        ".",
+        "..",
+        "",
+        "   ",
+    ],
+)
+def test_load_profile_refuses_traversal_or_reserved_name(tmp_profiles_dir, evil_name):
+    pm = ProfileManager()
+    with pytest.raises((ValueError, FileNotFoundError)):
+        pm.load_profile(evil_name)
+
+
+@pytest.mark.parametrize(
+    "evil_name",
+    ["..\\evil", "../evil", "CON", "PRN", "name/with/slash"],
+)
+def test_save_profile_refuses_traversal_or_reserved_name(tmp_profiles_dir, evil_name):
+    pm = ProfileManager()
+    with pytest.raises(ValueError):
+        pm.save_profile(evil_name, {})
+
+
+@pytest.mark.parametrize(
+    "evil_name",
+    ["..\\evil", "CON", "name/with/slash"],
+)
+def test_rename_profile_refuses_traversal_targets(tmp_profiles_dir, evil_name):
+    pm = ProfileManager()
+    pm.create_profile("Source", {})
+    with pytest.raises(ValueError):
+        pm.rename_profile("Source", evil_name)
+    # Source must still exist — rejection happens before the swap.
+    assert pm.profile_exists("Source")
+
+
+def test_delete_profile_refuses_traversal(tmp_profiles_dir):
+    pm = ProfileManager()
+    with pytest.raises(ValueError):
+        pm.delete_profile("..\\evil")
+
+
+def test_profile_exists_returns_false_for_invalid_names(tmp_profiles_dir):
+    pm = ProfileManager()
+    assert pm.profile_exists("..\\evil") is False
+    assert pm.profile_exists("CON") is False
+    assert pm.profile_exists("name/with/slash") is False
+
+
+def test_list_profiles_filters_invalid_stems(tmp_profiles_dir):
+    """Files matching reserved/invalid names on disk must not be listed."""
+    # The filesystem lets us write CON.json (since we bypass _safe_path), but
+    # list_profiles should silently skip it.
+    pm = ProfileManager()
+    pm.create_profile("Good", {})
+    # Manually write a bogus reserved-name profile.
+    (tmp_profiles_dir / "CON.json").write_text("{}", encoding="utf-8")
+    listed = pm.list_profiles()
+    assert "Good" in listed
+    assert "CON" not in listed
+
+
+def test_load_profile_resets_aes_keys_when_corrupt(tmp_profiles_dir):
+    """A profile JSON shouldn't crash the loader if aes_keys is the wrong type."""
+    pm = ProfileManager()
+    pm.create_profile("Bad", {})
+    # Hand-craft a profile with aes_keys as a string instead of a list.
+    bad = json.loads((tmp_profiles_dir / "Bad.json").read_text(encoding="utf-8"))
+    bad["aes_keys"] = "not-a-list"
+    (tmp_profiles_dir / "Bad.json").write_text(json.dumps(bad), encoding="utf-8")
+    loaded = pm.load_profile("Bad")
+    assert loaded["aes_keys"] == []

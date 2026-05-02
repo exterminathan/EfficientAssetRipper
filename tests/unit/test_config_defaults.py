@@ -88,3 +88,66 @@ def test_all_keys_returns_list_with_required_keys():
     keys = config.all_keys()
     assert isinstance(keys, list)
     assert REQUIRED_KEYS <= set(keys)
+
+
+# ---------------------------------------------------------------------------
+# Hardening: presets path safety + load fallback
+# ---------------------------------------------------------------------------
+
+def test_is_presets_path_safe_accepts_bundled_default():
+    """The bundled data/texture_presets.json is the only path safe-by-default."""
+    bundled = config.base_dir() / "data" / "texture_presets.json"
+    assert config.is_presets_path_safe(bundled) is True
+
+
+def test_is_presets_path_safe_rejects_external_path(tmp_path):
+    other = tmp_path / "evil_presets.json"
+    other.write_text("{}", encoding="utf-8")
+    assert config.is_presets_path_safe(other) is False
+
+
+def test_load_presets_falls_back_when_file_missing(monkeypatch, tmp_path, mock_qsettings):
+    """A missing presets file must not raise — the bundled defaults take over."""
+    config.set("presets_path", str(tmp_path / "does-not-exist.json"))
+    out = config.load_presets()
+    # Bundled file is what we should have read.
+    assert "presets" in out
+    assert "default_pbr" in out["presets"]
+
+
+def test_load_presets_falls_back_on_invalid_json(monkeypatch, tmp_path, mock_qsettings):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not: json", encoding="utf-8")
+    config.set("presets_path", str(bad))
+    out = config.load_presets()
+    assert "presets" in out
+
+
+def test_load_presets_falls_back_on_shape_violation(monkeypatch, tmp_path, mock_qsettings):
+    """A JSON file with the wrong shape must trigger fallback, not propagate."""
+    weird = tmp_path / "weird.json"
+    weird.write_text('{"not_presets": true}', encoding="utf-8")
+    config.set("presets_path", str(weird))
+    out = config.load_presets()
+    # Bundled defaults always have "presets".
+    assert "presets" in out
+
+
+def test_validate_presets_shape_accepts_real_presets(real_presets):
+    assert config._validate_presets_shape(real_presets) is True
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        [],
+        "string",
+        {"presets": "not-a-dict"},
+        {"presets": {"x": "not-a-dict"}},
+        {"presets": {"x": {}}},  # missing texture_slots
+        {"presets": {"x": {"texture_slots": "nope"}}},
+    ],
+)
+def test_validate_presets_shape_rejects_bad_payloads(bad):
+    assert config._validate_presets_shape(bad) is False

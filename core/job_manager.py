@@ -14,8 +14,10 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from _base import base_dir
 from core.asset_scanner import AssetEntry
 from core.blender_runner import BlenderResult, run_blender
+from core.log_redaction import redact_sensitive
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +62,10 @@ class JobManager(QThread):
         succeeded = 0
         failed = 0
 
-        # Set up log file
-        log_dir = Path(self._output_dir).parent / "logs"
+        # Set up log file under the install-rooted logs/ dir (avoids surprising
+        # log placement when the user picks an output_dir on a network share or
+        # at a drive root).
+        log_dir = base_dir() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"batch_{datetime.now():%Y%m%d_%H%M%S}.log"
 
@@ -162,4 +166,4 @@ class JobManager(QThread):
             "timestamp": datetime.now().isoformat(),
         }
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+            f.write(json.dumps(redact_sensitive(entry)) + "\n")

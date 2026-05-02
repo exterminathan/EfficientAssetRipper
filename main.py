@@ -121,6 +121,9 @@ def main():
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # Strip AES keys / hex blobs from any log record before it's emitted.
+    from core.log_redaction import install_global_redactor
+    install_global_redactor()
 
     # Windows: give this process its own identity so the taskbar shows
     # our icon instead of the generic Python interpreter icon.

@@ -208,3 +208,20 @@ def test_error_message_signal(unpacker_with_stub, qtbot):
     with qtbot.waitSignal(up.error, timeout=1000) as sig:
         proc.feed(json.dumps({"type": "error", "message": "boom"}))
     assert sig.args[0] == "boom"
+
+
+def test_oversized_ndjson_line_kills_child_and_emits_error(unpacker_with_stub, qtbot, monkeypatch):
+    """A runaway, newline-less stream must abort rather than buffer indefinitely."""
+    up, proc = unpacker_with_stub
+
+    # Shrink the cap so the test doesn't have to allocate megabytes.
+    import core.unpacker as up_mod
+    monkeypatch.setattr(up_mod, "_MAX_NDJSON_LINE_BYTES", 64)
+
+    # Hand it 256 bytes of garbage with no newline.
+    payload = b"x" * 256
+    with qtbot.waitSignal(up.error, timeout=1000) as sig:
+        proc.feed_chunk(payload)
+    assert "oversized" in sig.args[0].lower()
+    # The stub's kill() flips state to NotRunning.
+    assert proc.state() == QProcess.ProcessState.NotRunning

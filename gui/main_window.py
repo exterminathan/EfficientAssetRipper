@@ -372,12 +372,26 @@ class MainWindow(QMainWindow):
                 self._tab_actions[(id(tabs), name)] = (action, tabs, widget, i)
 
     def _show_about(self):
+        from html import escape
+        from urllib.parse import urlparse
+
         update_html = ""
         if self._update_info and self._update_info.is_newer:
-            update_html = (
-                f"<p><b>Update available:</b> {self._update_info.latest} — "
-                f'<a href="{self._update_info.release_url}">view release</a></p>'
-            )
+            url = self._update_info.release_url or ""
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower()
+            # The update_check module already filters URLs, but defence-in-depth
+            # belongs at the render site too — never embed a URL from anywhere
+            # other than github.com over HTTPS.
+            safe_url = url if (parsed.scheme == "https" and host == "github.com") else ""
+            tag_html = escape(self._update_info.latest)
+            if safe_url:
+                update_html = (
+                    f"<p><b>Update available:</b> {tag_html} — "
+                    f'<a href="{escape(safe_url, quote=True)}">view release</a></p>'
+                )
+            else:
+                update_html = f"<p><b>Update available:</b> {tag_html}</p>"
         QMessageBox.about(
             self,
             "About EfficientAssetRipper",
@@ -955,4 +969,11 @@ class MainWindow(QMainWindow):
         """Save profile and stop the CLI process on exit."""
         self._save_current_profile()
         self._unpacker_panel.shutdown()
+        # Block briefly on the update-checker so a long-running HTTP timeout
+        # can't keep the QThread alive past the QObject lifetime.
+        if self._update_checker is not None:
+            try:
+                self._update_checker.shutdown(timeout_ms=2000)
+            except Exception:  # noqa: BLE001
+                log.debug("update_checker.shutdown raised", exc_info=True)
         super().closeEvent(event)

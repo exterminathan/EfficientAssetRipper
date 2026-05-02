@@ -93,9 +93,17 @@ def test_blender_failure_continues_to_next_asset(qtbot, mock_blender_run, tmp_pa
     assert jm.results[1].success is True
 
 
-def test_log_file_written_to_output_dir(qtbot, mock_blender_run, tmp_path):
+def test_log_file_written_to_install_logs_dir(qtbot, mock_blender_run, tmp_path, monkeypatch):
+    """Job logs land under base_dir()/logs, regardless of output_dir shape."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
+
+    # Redirect base_dir() so this test doesn't pollute the real install logs/.
+    fake_base = tmp_path / "install"
+    fake_base.mkdir()
+    import core.job_manager as jm_mod
+    monkeypatch.setattr(jm_mod, "base_dir", lambda: fake_base)
+
     jm = JobManager(
         assets=[_entry("LogMe")],
         blender_exe="fake-blender",
@@ -104,7 +112,7 @@ def test_log_file_written_to_output_dir(qtbot, mock_blender_run, tmp_path):
     )
     _start_and_wait(qtbot, jm)
 
-    logs_dir = output_dir.parent / "logs"
+    logs_dir = fake_base / "logs"
     assert logs_dir.is_dir()
     log_files = list(logs_dir.glob("batch_*.log"))
     assert len(log_files) >= 1
@@ -114,6 +122,81 @@ def test_log_file_written_to_output_dir(qtbot, mock_blender_run, tmp_path):
             entry = json.loads(line)
             assert "asset" in entry
             assert "success" in entry
+
+
+@pytest.mark.parametrize(
+    "weird_output_dir",
+    [
+        # Drive root — old code would write logs at C:\logs.
+        "C:/",
+        # UNC path — old code would write \\server\logs.
+        "\\\\server\\share\\out",
+        # Relative path — old code would write logs/.. relative to cwd.
+        "outputs",
+    ],
+)
+def test_log_file_path_independent_of_output_dir_shape(
+    qtbot, mock_blender_run, tmp_path, monkeypatch, weird_output_dir
+):
+    fake_base = tmp_path / "install"
+    fake_base.mkdir()
+    import core.job_manager as jm_mod
+    monkeypatch.setattr(jm_mod, "base_dir", lambda: fake_base)
+
+    jm = JobManager(
+        assets=[_entry("X")],
+        blender_exe="fake-blender",
+        output_dir=weird_output_dir,
+        addon_name="addon.x",
+    )
+    _start_and_wait(qtbot, jm)
+    # Logs went into the install-rooted dir, not under the weird output_dir.
+    assert (fake_base / "logs").is_dir()
+    assert any((fake_base / "logs").glob("batch_*.log"))
+
+
+def test_log_entries_redact_aes_key_fields(qtbot, mock_blender_run, tmp_path, monkeypatch):
+    """Even if a log entry happens to carry a key, the file must not echo it."""
+    fake_base = tmp_path / "install"
+    fake_base.mkdir()
+    import core.job_manager as jm_mod
+    monkeypatch.setattr(jm_mod, "base_dir", lambda: fake_base)
+
+    secret = "a" * 64
+
+    # Inject an AssetEntry whose name embeds a key-shaped blob; the redactor
+    # uses field-name detection so we need a sensitive field. Patch the
+    # log entry construction to add one.
+    real_write = jm_mod.JobManager._write_log_entry
+
+    def _wrapped(self, log_path, idx, total, asset, result):
+        # Mimic a future change that tucks AES keys into the entry.
+        from datetime import datetime
+        from core.log_redaction import redact_sensitive
+        entry = {
+            "asset": asset.name,
+            "success": result.success,
+            "aes_key": secret,
+        }
+        with open(log_path, "a", encoding="utf-8") as f:
+            import json as _json
+            f.write(_json.dumps(redact_sensitive(entry)) + "\n")
+
+    monkeypatch.setattr(jm_mod.JobManager, "_write_log_entry", _wrapped)
+
+    jm = JobManager(
+        assets=[_entry("Sensitive")],
+        blender_exe="fake-blender",
+        output_dir=str(tmp_path / "out"),
+        addon_name="addon.x",
+    )
+    _start_and_wait(qtbot, jm)
+
+    log_files = list((fake_base / "logs").glob("batch_*.log"))
+    assert log_files
+    body = log_files[0].read_text(encoding="utf-8")
+    assert secret not in body
+    assert "REDACTED" in body
 
 
 def test_run_emits_job_started_then_completed_per_asset(

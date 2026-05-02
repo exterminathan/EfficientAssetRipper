@@ -25,6 +25,10 @@ from core.everything import (
 
 pytestmark = [pytest.mark.unit, pytest.mark.windows_only]
 
+# Absolute path used by tests that don't care about the actual DLL location;
+# the SDK now refuses non-absolute paths to avoid DLL-planting attacks.
+_ABS = r"C:\fake\Everything64.dll"
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -56,10 +60,12 @@ def _make_fake_dll(num_results: int = 0, last_error: int = EVERYTHING_OK,
     dll.Everything_GetNumResults.return_value = num_results
     dll.Everything_GetLastError.return_value = last_error
 
-    # Make GetResultFullPathNameW write into the buffer
+    # Production code now uses the two-call pattern: first invocation queries
+    # the required length with buf=None, second writes into the allocated buf.
     def _get_result(index, buf, size):
         text = paths[index] if 0 <= index < len(paths) else ""
-        # ctypes.create_unicode_buffer behaves like a mutable wstring
+        if buf is None:
+            return len(text)
         buf.value = text
         return len(text)
 
@@ -89,15 +95,24 @@ def test_init_raises_everythingerror_when_dll_missing(fake_dll):
 def test_init_with_explicit_dll_path(fake_dll):
     fake_dll.return_value = _make_fake_dll()
     sdk = EverythingSDK(dll_path=r"C:\custom\Everything64.dll")
-    fake_dll.assert_called_with(r"C:\custom\Everything64.dll")
+    # WinDLL is now invoked with LOAD_LIBRARY_SEARCH_SYSTEM32 (winmode=0x800)
+    # to block CWD/PATH-based DLL planting.
+    fake_dll.assert_called_with(r"C:\custom\Everything64.dll", winmode=0x800)
     # Prototypes set on the same instance returned by the factory
     assert sdk._dll is fake_dll.return_value
+
+
+def test_init_rejects_non_absolute_dll_path(fake_dll):
+    """A bare filename must not be loaded — that's the planting vector."""
+    fake_dll.return_value = _make_fake_dll()
+    with pytest.raises(EverythingError, match="absolute"):
+        EverythingSDK(dll_path="Everything64.dll")
 
 
 def test_init_sets_up_function_prototypes(fake_dll):
     dll = _make_fake_dll()
     fake_dll.return_value = dll
-    EverythingSDK(dll_path="x")
+    EverythingSDK(dll_path=_ABS)
     # MagicMock auto-creates attributes; .argtypes / .restype assignments
     # are recorded as ordinary attribute writes on the same MagicMock.
     assert dll.Everything_SetSearchW.argtypes == [everything.ctypes.c_wchar_p]
@@ -111,20 +126,20 @@ def test_init_sets_up_function_prototypes(fake_dll):
 
 def test_search_returns_empty_on_zero_results(fake_dll):
     fake_dll.return_value = _make_fake_dll(num_results=0)
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     assert sdk.search("foo") == []
 
 
 def test_search_decodes_wide_strings_from_pointer(fake_dll):
     paths = [r"C:\X\one.tga", r"D:\Y\two.tga"]
     fake_dll.return_value = _make_fake_dll(num_results=2, paths=paths)
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     assert sdk.search("anything") == paths
 
 
 def test_search_raises_on_query_failure_with_known_error(fake_dll):
     fake_dll.return_value = _make_fake_dll(query_ok=False, last_error=EVERYTHING_ERROR_IPC)
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     with pytest.raises(EverythingError, match="Everything service is not running"):
         sdk.search("foo")
 
@@ -132,7 +147,7 @@ def test_search_raises_on_query_failure_with_known_error(fake_dll):
 def test_search_passes_search_string_to_dll(fake_dll):
     dll = _make_fake_dll()
     fake_dll.return_value = dll
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     sdk.search("MyQuery")
     dll.Everything_SetSearchW.assert_called_with("MyQuery")
 
@@ -144,7 +159,7 @@ def test_search_passes_search_string_to_dll(fake_dll):
 def test_search_file_with_extension_builds_wfn_query(fake_dll):
     dll = _make_fake_dll()
     fake_dll.return_value = dll
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     sdk.search_file("T_Body_C", extension="tga", folder=r"C:\Games\Test")
     # Final call to SetSearchW is the constructed query
     actual_query = dll.Everything_SetSearchW.call_args.args[0]
@@ -155,7 +170,7 @@ def test_search_file_with_extension_builds_wfn_query(fake_dll):
 def test_search_file_without_extension_uses_bare_wfn(fake_dll):
     dll = _make_fake_dll()
     fake_dll.return_value = dll
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     sdk.search_file("BareName")
     actual_query = dll.Everything_SetSearchW.call_args.args[0]
     assert actual_query == 'wfn:"BareName"'
@@ -164,7 +179,7 @@ def test_search_file_without_extension_uses_bare_wfn(fake_dll):
 def test_find_psk_files_uses_ext_filter(fake_dll):
     dll = _make_fake_dll()
     fake_dll.return_value = dll
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     sdk.find_psk_files(folder=r"C:\GameRoot")
     actual_query = dll.Everything_SetSearchW.call_args.args[0]
     assert "ext:psk;pskx" in actual_query
@@ -174,7 +189,7 @@ def test_find_psk_files_uses_ext_filter(fake_dll):
 def test_find_props_file_searches_dot_props_dot_txt(fake_dll):
     dll = _make_fake_dll()
     fake_dll.return_value = dll
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     sdk.find_props_file("MI_Foo")
     actual_query = dll.Everything_SetSearchW.call_args.args[0]
     assert 'wfn:"MI_Foo.props.txt"' in actual_query
@@ -182,7 +197,7 @@ def test_find_props_file_searches_dot_props_dot_txt(fake_dll):
 
 def test_test_connection_handles_query_failure(fake_dll):
     fake_dll.return_value = _make_fake_dll(query_ok=False, last_error=EVERYTHING_ERROR_IPC)
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     ok, msg = sdk.test_connection()
     assert ok is False
     assert "Everything service is not running" in msg
@@ -190,7 +205,7 @@ def test_test_connection_handles_query_failure(fake_dll):
 
 def test_test_connection_returns_ok_when_query_succeeds(fake_dll):
     fake_dll.return_value = _make_fake_dll(query_ok=True)
-    sdk = EverythingSDK(dll_path="x")
+    sdk = EverythingSDK(dll_path=_ABS)
     ok, msg = sdk.test_connection()
     assert ok is True
     assert "connected" in msg.lower()
@@ -203,16 +218,16 @@ def test_test_connection_returns_ok_when_query_succeeds(fake_dll):
 def test_get_sdk_returns_singleton(fake_dll):
     fake_dll.return_value = _make_fake_dll()
     reset_sdk()
-    a = get_sdk(dll_path="x")
-    b = get_sdk(dll_path="x")
+    a = get_sdk(dll_path=_ABS)
+    b = get_sdk(dll_path=_ABS)
     assert a is b
     reset_sdk()
 
 
 def test_reset_sdk_clears_singleton(fake_dll):
     fake_dll.return_value = _make_fake_dll()
-    a = get_sdk(dll_path="x")
+    a = get_sdk(dll_path=_ABS)
     reset_sdk()
-    b = get_sdk(dll_path="x")
+    b = get_sdk(dll_path=_ABS)
     assert a is not b
     reset_sdk()

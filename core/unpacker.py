@@ -11,6 +11,11 @@ from PySide6.QtCore import QObject, QProcess, Signal, Slot
 
 log = logging.getLogger(__name__)
 
+# A single NDJSON line should never exceed this. The CLI emits per-asset
+# JSON objects which top out at low-double-digit KB; anything bigger is
+# either a runaway export listing or a corrupt stream.
+_MAX_NDJSON_LINE_BYTES = 16 * 1024 * 1024  # 16 MB
+
 
 class UnpackerProcess(QObject):
     """Persistent subprocess wrapper around CUE4ParseCLI.exe.
@@ -170,6 +175,21 @@ class UnpackerProcess(QObject):
     def _on_stdout(self):
         data = self._proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
         self._buffer += data
+        # If the child sends a runaway line (no newline, megabytes long), kill
+        # it rather than letting buffer growth turn into an OOM.
+        if len(self._buffer) > _MAX_NDJSON_LINE_BYTES:
+            log.error(
+                "CUE4ParseCLI exceeded NDJSON line size (%d bytes); killing child",
+                len(self._buffer),
+            )
+            self._buffer = ""
+            try:
+                if self._proc is not None:
+                    self._proc.kill()
+            except Exception:  # noqa: BLE001 — best-effort kill
+                pass
+            self.error.emit("CUE4ParseCLI emitted an oversized line; aborting.")
+            return
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
             line = line.strip()

@@ -267,7 +267,32 @@ class SettingsDialog(QDialog):
         config.set("blender_exe", self.blender_exe.text())
         config.set("output_dir", self.output_dir.text())
         config.set("everything_dll", self.everything_dll.text())
-        config.set("presets_path", self.presets_path.text())
+        # Presets path: a non-bundled location is allowed but requires a
+        # one-time confirmation so a stray file substitution can't sneak in
+        # during a settings round-trip.
+        new_presets = self.presets_path.text().strip()
+        if new_presets and not config.is_presets_path_safe(new_presets):
+            already_confirmed = (
+                config.get("presets_path_confirmed_external") == new_presets
+            )
+            if not already_confirmed:
+                resp = QMessageBox.warning(
+                    self,
+                    "External texture_presets.json",
+                    (
+                        f"The selected texture_presets.json is outside the install dir:\n"
+                        f"{new_presets}\n\n"
+                        "Continue using this file? Click No to revert to the bundled defaults."
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if resp != QMessageBox.StandardButton.Yes:
+                    new_presets = str(config.base_dir() / "data" / "texture_presets.json")
+                    self.presets_path.setText(new_presets)
+                else:
+                    config.set("presets_path_confirmed_external", new_presets)
+        config.set("presets_path", new_presets)
         config.set("psk_addon_name", self.addon_name.text())
         config.set("timeout_seconds", self.timeout.value())
         config.set("cue4parse_cli", self.cue4parse_cli.text())
