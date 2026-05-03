@@ -184,10 +184,13 @@ def check_for_update(
     current: str = __version__,
     *,
     now: Optional[float] = None,
+    force_refresh: bool = False,
 ) -> Optional[UpdateInfo]:
-    """Return UpdateInfo (or None on any failure). Honours the 24h cache."""
+    """Return UpdateInfo (or None on any failure). Honours the 24h cache
+    unless *force_refresh* is set, in which case the cache is bypassed
+    on read but still updated on a successful fetch."""
     now = now if now is not None else time.time()
-    cached = _read_cache(now)
+    cached = None if force_refresh else _read_cache(now)
     if cached and cached.get("repo") == repo:
         latest = str(cached.get("tag_name", ""))
         url = str(cached.get("html_url", ""))
@@ -222,13 +225,16 @@ def check_for_update(
 class _UpdateCheckWorker(QThread):
     finished_with = Signal(object)  # UpdateInfo or None
 
-    def __init__(self, repo: str, parent=None):
+    def __init__(self, repo: str, parent=None, force_refresh: bool = False):
         super().__init__(parent)
         self._repo = repo
+        self._force_refresh = force_refresh
 
     def run(self):
         try:
-            self.finished_with.emit(check_for_update(self._repo))
+            self.finished_with.emit(
+                check_for_update(self._repo, force_refresh=self._force_refresh)
+            )
         except Exception as e:  # last-ditch: must never crash the app
             log.debug("update_check: worker exception: %s", e)
             self.finished_with.emit(None)
@@ -245,10 +251,10 @@ class UpdateChecker(QObject):
         self._repo = repo
         self._worker: Optional[_UpdateCheckWorker] = None
 
-    def start(self) -> None:
+    def start(self, *, force_refresh: bool = False) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
-        self._worker = _UpdateCheckWorker(self._repo, self)
+        self._worker = _UpdateCheckWorker(self._repo, self, force_refresh=force_refresh)
         self._worker.finished_with.connect(self._on_finished)
         self._worker.start()
 

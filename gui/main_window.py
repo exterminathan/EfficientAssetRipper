@@ -220,6 +220,7 @@ class MainWindow(QMainWindow):
         # the splash. UpdateChecker fails silently on any error.
         self._update_info = None
         self._update_checker = None
+        self._manual_update_checker = None
         QTimer.singleShot(2000, self._start_update_check)
 
     # ------------------------------------------------------------------
@@ -420,16 +421,19 @@ class MainWindow(QMainWindow):
         self._right_tabs.setCurrentWidget(self._tga_previewer)
 
     def _build_menu(self):
-        from PySide6.QtGui import QKeySequence
+        from PySide6.QtGui import QAction
 
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("&File")
         settings_action = file_menu.addAction("&Settings...", self._open_settings)
-        settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
+        # NoRole keeps Qt from auto-promoting "Settings"/"Exit" into the
+        # platform-native application menu (or doubling the entry on
+        # platforms where it inserts a duplicated mirror).
+        settings_action.setMenuRole(QAction.MenuRole.NoRole)
         file_menu.addSeparator()
         exit_action = file_menu.addAction("E&xit", self.close)
-        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        exit_action.setMenuRole(QAction.MenuRole.NoRole)
 
         tools_menu = menubar.addMenu("&Tools")
         tools_menu.addAction(
@@ -439,6 +443,7 @@ class MainWindow(QMainWindow):
 
         help_menu = menubar.addMenu("&Help")
         help_menu.addAction("Run Setup &Wizard...", self._force_run_setup_wizard)
+        help_menu.addAction("Check for &Updates...", self._check_for_updates_now)
         help_menu.addSeparator()
         help_menu.addAction("&About...", self._show_about)
 
@@ -490,6 +495,74 @@ class MainWindow(QMainWindow):
             '<p><a href="https://github.com/exterminathan/EfficientAssetRipper">'
             "github.com/exterminathan/EfficientAssetRipper</a></p>",
         )
+
+    def _check_for_updates_now(self):
+        """Help-menu trigger: force a fresh update check and show the result."""
+        from html import escape
+        from urllib.parse import urlparse
+
+        from core.update_check import UpdateChecker
+
+        # If a previous menu-triggered checker is still running, ignore the
+        # click — the user can wait for it to complete.
+        if getattr(self, "_manual_update_checker", None) is not None:
+            checker = self._manual_update_checker
+            worker = getattr(checker, "_worker", None)
+            if worker is not None and worker.isRunning():
+                return
+
+        progress = QProgressDialog("Checking for updates...", None, 0, 0, self)
+        progress.setWindowTitle("Check for Updates")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        checker = UpdateChecker(parent=self)
+        self._manual_update_checker = checker
+
+        def _on_complete(info):
+            try:
+                progress.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._manual_update_checker = None
+
+            if info is None:
+                QMessageBox.warning(
+                    self, "Check for Updates",
+                    "Could not reach the update server.\n\n"
+                    "Check your network connection and try again later.",
+                )
+                return
+
+            # Cache the freshest result so the About dialog reflects it too.
+            self._update_info = info
+
+            if info.is_newer:
+                url = info.release_url or ""
+                parsed = urlparse(url)
+                host = (parsed.hostname or "").lower()
+                safe_url = url if (parsed.scheme == "https" and host == "github.com") else ""
+                tag_html = escape(info.latest)
+                body = (
+                    f"<p><b>A new version is available: {tag_html}</b></p>"
+                    f"<p>You are running v{escape(info.current)}.</p>"
+                )
+                if safe_url:
+                    body += (
+                        f'<p><a href="{escape(safe_url, quote=True)}">'
+                        "View the release on GitHub</a></p>"
+                    )
+                QMessageBox.information(self, "Update Available", body)
+            else:
+                QMessageBox.information(
+                    self, "Up to Date",
+                    f"You are running the latest version (v{info.current}).",
+                )
+
+        checker.check_complete.connect(_on_complete)
+        checker.start(force_refresh=True)
 
     def _toggle_tab(self, tab_widget: QTabWidget, widget: QWidget, name: str, visible: bool):
         """Show or hide a tab in a QTabWidget."""
@@ -1150,11 +1223,12 @@ class MainWindow(QMainWindow):
             self._unpacker_panel.shutdown()
         except Exception:
             log.exception("UnpackerPanel.shutdown raised")
-        # Block briefly on the update-checker so a long-running HTTP timeout
-        # can't keep the QThread alive past the QObject lifetime.
-        if self._update_checker is not None:
-            try:
-                self._update_checker.shutdown(timeout_ms=2000)
-            except Exception:  # noqa: BLE001
-                log.debug("update_checker.shutdown raised", exc_info=True)
+        # Block briefly on the update-checkers so a long-running HTTP timeout
+        # can't keep their QThreads alive past the QObject lifetime.
+        for checker in (self._update_checker, self._manual_update_checker):
+            if checker is not None:
+                try:
+                    checker.shutdown(timeout_ms=2000)
+                except Exception:  # noqa: BLE001
+                    log.debug("update_checker.shutdown raised", exc_info=True)
         super().closeEvent(event)

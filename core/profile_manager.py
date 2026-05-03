@@ -35,6 +35,7 @@ PROFILE_KEYS = {
     "psk_processed",
     "color_scheme",
     "custom_schemes",
+    "auto_save_paths",
 }
 
 _EMPTY_PROFILE: dict = {
@@ -49,6 +50,7 @@ _EMPTY_PROFILE: dict = {
     "psk_processed": [],
     "color_scheme": "",
     "custom_schemes": {},
+    "auto_save_paths": False,
 }
 
 
@@ -135,6 +137,8 @@ class ProfileManager:
                 data[k] = []
             elif k == "custom_schemes" and not isinstance(data[k], dict):
                 data[k] = {}
+            elif k == "auto_save_paths" and not isinstance(data[k], bool):
+                data[k] = bool(data[k])
         data["name"] = name.strip()
         return data
 

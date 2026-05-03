@@ -226,13 +226,10 @@ QComboBox::drop-down {{
     width: 24px;
 }}
 
-QComboBox::down-arrow {{
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid {c["text_secondary"]};
-    margin-right: 6px;
-}}
+/* Don't paint the arrow via QSS — the CSS border-triangle technique is
+   unreliable inside Qt's sub-control layout. _BranchCircleStyle paints
+   PE_IndicatorArrowDown for us so the arrow always shows up in the
+   theme's text colour. */
 
 QComboBox QAbstractItemView {{
     background-color: {c["bg_mid"]};
@@ -617,18 +614,26 @@ QPushButton[cssClass="collapsible"]:hover {{
 # Custom branch-indicator style (solid / hollow circles)
 # ---------------------------------------------------------------------------
 
-from PySide6.QtCore import QRect, QRectF, Qt
-from PySide6.QtGui import QBrush, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
+from PySide6.QtGui import QBrush, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QProxyStyle, QStyle, QStyleOption
 
 
 class _BranchCircleStyle(QProxyStyle):
-    """Draws solid (collapsed) and hollow (expanded) circles for tree
-    branch indicators instead of the default arrows."""
+    """Custom drawing for tree branch indicators (solid/hollow circles)
+    and combobox/spinbox down-arrows (filled triangle in theme color).
 
-    def __init__(self, accent_color: str, base_style=None):
+    The arrow override exists because QSS ``QComboBox::down-arrow`` cannot
+    reliably paint a CSS-style border-triangle inside Qt's sub-control
+    layout, and leaving the arrow unstyled while restyling the combobox
+    body makes the indicator disappear on some Qt versions. Painting it
+    here keeps it visible regardless of QSS rules.
+    """
+
+    def __init__(self, accent_color: str, arrow_color: str | None = None, base_style=None):
         super().__init__(base_style)
         self._accent = QColor(accent_color)
+        self._arrow = QColor(arrow_color) if arrow_color else QColor(accent_color)
         self._diameter = 10  # px
 
     def drawPrimitive(self, element, option, painter, widget=None):
@@ -657,7 +662,41 @@ class _BranchCircleStyle(QProxyStyle):
                 painter.drawEllipse(rect)
                 painter.restore()
                 return
+        if element == QStyle.PrimitiveElement.PE_IndicatorArrowDown:
+            self._draw_arrow(option, painter, direction="down")
+            return
+        if element == QStyle.PrimitiveElement.PE_IndicatorArrowUp:
+            self._draw_arrow(option, painter, direction="up")
+            return
         super().drawPrimitive(element, option, painter, widget)
+
+    def _draw_arrow(self, option, painter, direction: str) -> None:
+        r = option.rect
+        if r.width() <= 0 or r.height() <= 0:
+            return
+        cx = r.center().x() + 0.5
+        cy = r.center().y() + 0.5
+        # Triangle 8 wide × 5 tall, scaled down for tiny rects.
+        half_w = min(4.0, r.width() / 2.0)
+        half_h = min(2.5, r.height() / 2.0)
+        if direction == "up":
+            pts = [
+                QPointF(cx - half_w, cy + half_h),
+                QPointF(cx + half_w, cy + half_h),
+                QPointF(cx, cy - half_h),
+            ]
+        else:  # down
+            pts = [
+                QPointF(cx - half_w, cy - half_h),
+                QPointF(cx + half_w, cy - half_h),
+                QPointF(cx, cy + half_h),
+            ]
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(self._arrow))
+        painter.drawPolygon(QPolygonF(pts))
+        painter.restore()
 
 
 # ---------------------------------------------------------------------------
@@ -696,7 +735,11 @@ def apply(app: QApplication, scheme_name: str | None = None) -> None:
 
     # Build the new style first so Qt has its own reference before we drop
     # ours — `app.setStyle()` takes ownership and deletes the previous one.
-    new_style = _BranchCircleStyle(c["progress_chunk"], "Fusion")
+    new_style = _BranchCircleStyle(
+        c["progress_chunk"],
+        arrow_color=c["text_secondary"],
+        base_style="Fusion",
+    )
     new_style.setParent(app)      # prevent GC
     app.setStyle(new_style)
     # `_current_style` previously kept a Python ref to the old style; drop it

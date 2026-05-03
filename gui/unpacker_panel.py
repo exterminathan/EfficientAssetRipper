@@ -435,7 +435,7 @@ class UnpackerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _mount_archives(self):
-        cli_path = config.get("cue4parse_cli")
+        cli_path = config.get_cue4parse_cli()
         if not cli_path:
             QMessageBox.warning(self, "CLI Not Configured",
                                 "Set the CUE4ParseCLI path in Settings first.")

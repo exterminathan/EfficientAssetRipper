@@ -69,6 +69,31 @@ def get_presets_path() -> Path:
     return Path(p) if p else base_dir() / "data" / "texture_presets.json"
 
 
+def get_cue4parse_cli() -> str:
+    """Return a usable CUE4ParseCLI path, falling back to the bundled exe.
+
+    Resolution order:
+      1. The user-configured ``cue4parse_cli`` path, if it exists.
+      2. The bundled exe at ``<app>/cue4parse_cli/bin/publish/CUE4ParseCLI.exe``.
+      3. The configured value as-is, so the caller can produce its own
+         "not found" error pointing at what the user actually set.
+
+    This shields users whose stored path went stale (e.g. moved repos out
+    of a Drive folder) from having to re-pick the CLI in Settings.
+    """
+    configured = get("cue4parse_cli")
+    if configured:
+        try:
+            if Path(configured).is_file():
+                return configured
+        except OSError:
+            pass
+    bundled = base_dir() / "cue4parse_cli" / "bin" / "publish" / "CUE4ParseCLI.exe"
+    if bundled.is_file():
+        return str(bundled)
+    return configured
+
+
 def is_presets_path_safe(path: Path | str) -> bool:
     """Return True if *path* is the bundled presets file (no prompt needed)."""
     bundled_dir = (base_dir() / "data").resolve()
