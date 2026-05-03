@@ -22,6 +22,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     environment: release
+    env:
+      # See build.yml — the runner's `py` launcher defaults to the newest
+      # registered Python (3.14), which has no PySide6 wheels yet.
+      PY_PYTHON: "3.11"
     permissions:
       # contents: write — softprops/action-gh-release publishes assets.
       # id-token / attestations: write — actions/attest-build-provenance.

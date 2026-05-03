@@ -14,6 +14,12 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      # Force the Windows `py` launcher to pick the same Python that
+      # actions/setup-python configured.  Without this, `py` uses the
+      # newest registered version on the runner (currently 3.14) and
+      # PySide6 ships no wheels for that.
+      PY_PYTHON: "3.11"
 
     steps:
       - name: Checkout
