@@ -250,3 +250,95 @@ def test_unpacker_panel_cancel_export_public_alias(qtbot, mock_qsettings):
     # The public method should exist and be safely callable when not exporting.
     assert callable(getattr(panel, "cancel_export", None))
     panel.cancel_export()
+
+
+# ---------------------------------------------------------------------------
+# CLI hardening contract — events the Python side must dispatch cleanly
+# ---------------------------------------------------------------------------
+
+def test_aes_keys_malformed_warning_dispatches(unpacker_with_stub, qtbot):
+    """The CLI emits this warning when aes_keys is not a JArray (Phase 3.4)."""
+    up, proc = unpacker_with_stub
+    with qtbot.waitSignal(up.warning, timeout=1000) as sig:
+        proc.feed(json.dumps({
+            "type": "warning",
+            "message": "aes_keys malformed; ignoring",
+        }))
+    assert "aes_keys" in sig.args[0]
+
+
+def test_aes_key_invalid_warning_is_generic(unpacker_with_stub, qtbot):
+    """AES error messages from the CLI are generic — must not echo raw bytes (Phase 2.3)."""
+    up, proc = unpacker_with_stub
+    with qtbot.waitSignal(up.warning, timeout=1000) as sig:
+        proc.feed(json.dumps({
+            "type": "warning",
+            "message": "Key 00000000000000000000000000000000: invalid (length or format)",
+        }))
+    msg = sig.args[0]
+    assert "invalid" in msg
+    assert "length or format" in msg
+
+
+def test_path_traversal_in_export_done_failed_list(unpacker_with_stub, qtbot):
+    """Export of `../../foo.uasset` must surface as a failed entry, not a crash (Phase 1.1)."""
+    up, proc = unpacker_with_stub
+    payload = {
+        "type": "export_done",
+        "succeeded": [],
+        "failed": [
+            {"path": "../../etc/passwd.uasset", "error": "Path escapes root: ../../etc"},
+        ],
+        "total": 1,
+    }
+    with qtbot.waitSignal(up.export_done, timeout=1000) as sig:
+        proc.feed(json.dumps(payload))
+    assert sig.args[0] == []
+    assert sig.args[1][0]["path"].startswith("../")
+    assert "escapes" in sig.args[1][0]["error"].lower()
+
+
+def test_input_line_too_large_error_dispatches(unpacker_with_stub, qtbot):
+    """The CLI's stdin line-cap surfaces as an error event (Phase 3.2)."""
+    up, proc = unpacker_with_stub
+    with qtbot.waitSignal(up.error, timeout=1000) as sig:
+        proc.feed(json.dumps({"type": "error", "message": "input line too large"}))
+    assert "too large" in sig.args[0]
+
+
+def test_serialize_thread_cap_warning_dispatches(unpacker_with_stub, qtbot):
+    """Bounded serialize-thread overflow surfaces as a warning (Phase 3.3)."""
+    up, proc = unpacker_with_stub
+    with qtbot.waitSignal(up.warning, timeout=1000) as sig:
+        proc.feed(json.dumps({
+            "type": "warning",
+            "message": "Serialize thread cap reached; skipping",
+        }))
+    assert "thread cap" in sig.args[0]
+
+
+def test_oodle_hash_mismatch_warning_dispatches(unpacker_with_stub, qtbot):
+    """Hash-pinned downloads must report mismatch as a warning (Phase 1.4)."""
+    up, proc = unpacker_with_stub
+    msg = (
+        "Oodle download hash mismatch (expected aabb, got ccdd). Refusing to extract."
+    )
+    with qtbot.waitSignal(up.warning, timeout=1000) as sig:
+        proc.feed(json.dumps({"type": "warning", "message": msg}))
+    assert "hash mismatch" in sig.args[0].lower()
+
+
+def test_utf8_round_trip_through_dispatch(unpacker_with_stub, qtbot):
+    """CJK / non-ASCII filenames must round-trip cleanly (Phase 2.1)."""
+    up, proc = unpacker_with_stub
+    payload = {
+        "type": "browse_result",
+        "path": "/Game/サウンド",
+        "entries": [{"name": "音乐.uasset", "is_folder": False, "asset_type": "Audio"}],
+    }
+    with qtbot.waitSignal(up.browse_result, timeout=1000) as sig:
+        # Force the chunk to be the exact UTF-8 bytes the CLI would emit.
+        raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        proc.feed_chunk(raw)
+    assert sig.args[0] == "/Game/サウンド"
+    assert sig.args[1][0]["name"] == "音乐.uasset"

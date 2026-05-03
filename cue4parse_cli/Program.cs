@@ -53,7 +53,7 @@ internal static class Program
     private static bool _wemMapBuilt;               // true once the map has been built/loaded this session
     private static Task? _exportTask;               // currently running export (if any)
     private static Task<string?>? _pendingReadTask;   // parked stdin read from RunExportWithCancelSupport
-    private static JObject? _pendingGetProps;          // queued get_props command during export
+    private static readonly Queue<JObject> _pendingGetProps = new(); // get_props commands queued during export
     private static readonly object _respondLock = new(); // guards stdout writes during concurrent export
 
     private static readonly JsonSerializerOptions _writeOpts = new()
@@ -62,9 +62,168 @@ internal static class Program
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
+    // ─── Path containment ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Combine <paramref name="root"/> with <paramref name="parts"/> and verify the
+    /// resulting absolute path stays inside <paramref name="root"/>. Throws if a
+    /// part contains traversal (../) that escapes the root. Use at every write
+    /// site that takes attacker-influenced names.
+    /// </summary>
+    private static string SafeJoin(string root, params string[] parts)
+    {
+        var combined = Path.Combine(new[] { root }.Concat(parts).ToArray());
+        var fullRoot = Path.GetFullPath(root);
+        if (!fullRoot.EndsWith(Path.DirectorySeparatorChar.ToString()))
+            fullRoot += Path.DirectorySeparatorChar;
+        var full = Path.GetFullPath(combined);
+        // Allow `full == fullRoot` (no separator) for the root itself.
+        var fullWithSep = full + Path.DirectorySeparatorChar;
+        if (!full.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase) &&
+            !fullWithSep.Equals(fullRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            var label = parts.Length > 0 ? parts[0] : "<empty>";
+            throw new InvalidOperationException($"Path escapes root: {label}");
+        }
+        return full;
+    }
+
+    /// <summary>
+    /// Split <paramref name="folder"/> on '/' and '\\', sanitize each segment,
+    /// reject traversal (.., .) segments, and SafeJoin the result onto
+    /// <paramref name="root"/>. Used for parent-supplied directory layouts.
+    /// </summary>
+    private static string SafeJoinFolderSegments(string root, string folder)
+    {
+        if (string.IsNullOrEmpty(folder)) return SafeJoin(root);
+
+        var segments = folder.Split(new[] { '/', '\\' },
+            StringSplitOptions.RemoveEmptyEntries);
+        var safe = new List<string>(segments.Length);
+        foreach (var raw in segments)
+        {
+            if (raw == "." || raw == "..")
+                throw new InvalidOperationException("traversal segment");
+            var clean = SanitizeName(raw);
+            if (string.IsNullOrEmpty(clean))
+                throw new InvalidOperationException("empty segment after sanitize");
+            safe.Add(clean);
+        }
+        return SafeJoin(root, safe.ToArray());
+    }
+
+    /// <summary>
+    /// Strip drive letters and absolute paths from messages forwarded to the
+    /// parent so warnings/errors don't leak the user's filesystem layout.
+    /// </summary>
+    private static string SanitizeMessage(string? msg)
+    {
+        if (string.IsNullOrEmpty(msg)) return "";
+        // Replace Windows drive letters and POSIX absolute paths with <path>.
+        var withoutDrives = System.Text.RegularExpressions.Regex.Replace(
+            msg, @"[A-Za-z]:[\\/][^\s'""]+", "<path>");
+        var withoutPosix = System.Text.RegularExpressions.Regex.Replace(
+            withoutDrives, @"(?<![A-Za-z0-9])/(?:[^\s'""/]+/)+[^\s'""/]+", "<path>");
+        return withoutPosix;
+    }
+
+    /// <summary>
+    /// Run <paramref name="action"/> on a 4 MB-stack background thread to avoid
+    /// StackOverflow on deeply-nested CUE4Parse object graphs. Caps active
+    /// threads at <see cref="MaxConcurrentSerializeThreads"/>; on overflow
+    /// emits a warning and returns null. capturedError is populated if the
+    /// action threw before completing.
+    /// </summary>
+    private static T? RunOnBoundedThread<T>(Func<T> action, int timeoutMs, out Exception? capturedError) where T : class
+    {
+        T? result = null;
+        Exception? err = null;
+        Thread thread;
+        lock (_serializeThreadsLock)
+        {
+            _serializeThreads.RemoveWhere(t => !t.IsAlive);
+            if (_serializeThreads.Count >= MaxConcurrentSerializeThreads)
+            {
+                Respond(new { type = "warning", message = "Serialize thread cap reached; skipping" });
+                capturedError = null;
+                return null;
+            }
+            thread = new Thread(() =>
+            {
+                try { result = action(); }
+                catch (Exception ex) { err = ex; }
+                finally
+                {
+                    lock (_serializeThreadsLock)
+                    {
+                        _serializeThreads.Remove(Thread.CurrentThread);
+                    }
+                }
+            }, 4 * 1024 * 1024)
+            {
+                IsBackground = true,
+                Priority = ThreadPriority.BelowNormal
+            };
+            _serializeThreads.Add(thread);
+            thread.Start();
+        }
+        thread.Join(timeoutMs);
+        capturedError = err;
+        return result;
+    }
+
+    private static string? RunSerializeOnBoundedThread(Func<string> action, int timeoutMs)
+        => RunOnBoundedThread(action, timeoutMs, out _);
+
+    // ─── Constants ────────────────────────────────────────────────────
+
+    // Pin downloaded toolchain artifacts by SHA-256. If GitHub serves a different
+    // payload (compromise or version drift), download is rejected. Update these
+    // when bumping the URL/tag.
+    private const string OodleZipSha256 =
+        "2c7b9350b1a396690ef233fc79f945b62453e7f9b026645e00b75a2d8569f283";
+    private const string OodleZipUrl =
+        "https://github.com/WorkingRobot/OodleUE/releases/download/2026-01-25-1223/clang-cl-x64-release.zip";
+
+    private const string VgmstreamZipSha256 =
+        "7a8f9556df7706e5dca74169ace817c1eda6bb8d8f0ab68810e6ec4c0d300573";
+    private const string VgmstreamZipUrl =
+        "https://github.com/vgmstream/vgmstream/releases/download/r1980/vgmstream-win64.zip";
+
+    // Hard cap on a single NDJSON command line. Anything bigger is treated as
+    // adversarial input (stuck/runaway parent) — drop the line and respond with
+    // an error rather than buffering forever.
+    private const int MaxStdinLineBytes = 4 * 1024 * 1024;
+
+    // Bound concurrent serialization threads. Each is a fresh 4 MB stack so
+    // unbounded growth = OOM. If we hit the cap, refuse new work and warn.
+    private const int MaxConcurrentSerializeThreads = 8;
+    private static readonly HashSet<Thread> _serializeThreads = new();
+    private static readonly object _serializeThreadsLock = new();
+
     // ─── Entry ────────────────────────────────────────────────────────
     private static async Task Main(string[] args)
     {
+        // Force UTF-8 stdout with LF newlines so NDJSON consumers (the Python
+        // parent) get bytes that decode cleanly even on Windows code pages.
+        Console.OutputEncoding = new System.Text.UTF8Encoding(false);
+        Console.Out.NewLine = "\n";
+
+        // --help / -h / /? — print usage and exit
+        if (args.Length > 0 && args[0] is "--help" or "-h" or "/?")
+        {
+            Console.WriteLine("CUE4ParseCLI — NDJSON IPC over stdio.");
+            Console.WriteLine("");
+            Console.WriteLine("Usage: CUE4ParseCLI[.exe] [--version | --help]");
+            Console.WriteLine("");
+            Console.WriteLine("Commands are read from stdin as one JSON object per line.");
+            Console.WriteLine("Replies are emitted to stdout as one JSON object per line.");
+            Console.WriteLine("Commands: init, browse, export, export_folder, inspect,");
+            Console.WriteLine("          list_exports, get_props, scan_wwise_events,");
+            Console.WriteLine("          export_wwise_audio, rebuild_wem_cache, cancel, quit");
+            return;
+        }
+
         // If --version flag, print and exit
         if (args.Length > 0 && args[0] == "--version")
         {
@@ -72,8 +231,33 @@ internal static class Program
             return;
         }
 
-        // NDJSON stdin loop
-        using var reader = new StreamReader(Console.OpenStandardInput());
+        try
+        {
+            await RunMainLoop();
+        }
+        finally
+        {
+            // Best-effort provider release. We intentionally don't await long
+            // teardown here — the process is exiting anyway, and CUE4Parse's
+            // Dispose can wedge on partially-mounted providers. Force exit if
+            // Dispose hasn't returned within 2s.
+            var disposeThread = new Thread(() =>
+            {
+                try { _provider?.Dispose(); } catch { /* best effort */ }
+            }) { IsBackground = true };
+            disposeThread.Start();
+            disposeThread.Join(2_000);
+            _provider = null;
+        }
+    }
+
+    private static async Task RunMainLoop()
+    {
+        // NDJSON stdin loop. Do NOT wrap in `using` — closing the Console
+        // stdin stream during shutdown can wedge the process on Windows when
+        // the parent hasn't closed its write end yet. We're about to exit, so
+        // the OS cleans this up for us.
+        var reader = new StreamReader(Console.OpenStandardInput());
         while (true)
         {
             // Consume any parked read left by RunExportWithCancelSupport
@@ -85,7 +269,7 @@ internal static class Program
             }
             else
             {
-                line = await reader.ReadLineAsync();
+                line = await ReadLineCappedAsync(reader);
             }
             if (line == null) break;
             if (string.IsNullOrWhiteSpace(line)) continue;
@@ -140,8 +324,54 @@ internal static class Program
             }
             catch (Exception ex)
             {
-                RespondError(ex.Message);
+                RespondError(SanitizeMessage(ex.Message));
             }
+        }
+    }
+
+    /// <summary>
+    /// Read a line from stdin with a hard length cap. On overflow, drains
+    /// characters until the next newline, emits a structured error, and
+    /// returns "" so the caller skips this line. Returns null on EOF.
+    /// Uses char-by-char reads so a runaway parent cannot OOM us via an
+    /// unbounded buffered line.
+    /// </summary>
+    private static async Task<string?> ReadLineCappedAsync(StreamReader reader)
+    {
+        var sb = new System.Text.StringBuilder(256);
+        var buf = new char[1];
+        bool overflow = false;
+        while (true)
+        {
+            int n = await reader.ReadAsync(buf, 0, 1);
+            if (n == 0)
+            {
+                if (overflow)
+                {
+                    RespondError("input line too large");
+                    return "";
+                }
+                return sb.Length == 0 ? null : sb.ToString();
+            }
+            char c = buf[0];
+            if (c == '\r') continue;
+            if (c == '\n')
+            {
+                if (overflow)
+                {
+                    RespondError("input line too large");
+                    return "";
+                }
+                return sb.ToString();
+            }
+            if (overflow) continue; // drain until newline
+            if (sb.Length >= MaxStdinLineBytes)
+            {
+                overflow = true;
+                sb.Clear();
+                continue;
+            }
+            sb.Append(c);
         }
     }
 
@@ -154,10 +384,14 @@ internal static class Program
     {
         _exportTask = Task.Run(exportAction);
 
-        // Single-threaded async read loop — avoids concurrent StreamReader access
+        // Single-threaded async read loop — avoids concurrent StreamReader access.
+        // NOTE: cancel only fires between assets; CUE4Parse's LoadPackage is not
+        // interruptible mid-call, so a pathological asset can extend the cancel
+        // latency. Quit handlers cap that wait at 5s, killing the process if
+        // the export thread is still wedged.
         while (true)
         {
-            var lineTask = _pendingReadTask ?? reader.ReadLineAsync();
+            var lineTask = _pendingReadTask ?? ReadLineCappedAsync(reader);
             _pendingReadTask = null;
 
             var first = await Task.WhenAny(lineTask, _exportTask);
@@ -185,33 +419,49 @@ internal static class Program
                     case "quit":
                         _cts.Cancel();
                         Respond(new { type = "quit_ack" });
-                        await _exportTask;
-                        _exportTask = null;
-                        return;
+                        // Bound the wait — if the export is wedged inside a
+                        // non-interruptible LoadPackage, hard-exit so the
+                        // parent isn't stranded waiting on us. Either way the
+                        // parent asked us to exit, so we always Environment.Exit
+                        // here rather than returning to the main loop, which
+                        // would otherwise block on the next stdin read.
+                        _exportTask.Wait(TimeSpan.FromSeconds(5));
+                        try { _provider?.Dispose(); } catch { /* best effort */ }
+                        _provider = null;
+                        Environment.Exit(0);
+                        return; // unreachable
                     case "browse":
                         // Browse is safe during export (read-only, no LoadPackage)
                         HandleBrowse(subCmd);
                         break;
                     case "get_props":
-                        _pendingGetProps = subCmd; // queue for after export
+                        // Queue for after export — multiple get_props calls
+                        // during a long export must all be honored, in order.
+                        _pendingGetProps.Enqueue(subCmd);
                         break;
                     default:
                         break; // Other commands wait until export finishes
                 }
             }
+            catch (OperationCanceledException) { /* swallow — already emitted cancelled */ }
             catch { /* ignore malformed lines during export */ }
 
             if (_exportTask!.IsCompleted) break;
         }
 
-        await _exportTask!;
+        try
+        {
+            await _exportTask!;
+        }
+        catch (OperationCanceledException) { /* expected on cancel */ }
         _exportTask = null;
 
         // Flush any queued get_props that arrived during export
-        if (_pendingGetProps != null)
+        while (_pendingGetProps.Count > 0)
         {
-            HandleGetProps(_pendingGetProps);
-            _pendingGetProps = null;
+            var queued = _pendingGetProps.Dequeue();
+            try { HandleGetProps(queued); }
+            catch (Exception ex) { RespondError(SanitizeMessage(ex.Message)); }
         }
 
         // Reset the CTS for the next operation (in case cancel was used)
@@ -240,22 +490,38 @@ internal static class Program
         _wemIdToName = new(StringComparer.OrdinalIgnoreCase);
         _wemMapBuilt = false;
         {
-            // Build a stable per-directory cache key via FNV-1a over the lowercased path
-            uint h = 2166136261u;
-            foreach (var c in gameDir.ToLowerInvariant()) { h ^= c; h *= 16777619u; }
-            _wemNameCachePath = Path.Combine(Path.GetTempPath(), "CUE4ParseCLI_wem_names", $"{h:x8}.json");
+            // SHA-256 truncated to 16 hex chars: stronger collision resistance
+            // than FNV-32 with negligible runtime cost.
+            var bytes = System.Text.Encoding.UTF8.GetBytes(gameDir.ToLowerInvariant());
+            var hash = System.Security.Cryptography.SHA256.HashData(bytes);
+            var sb = new System.Text.StringBuilder(16);
+            for (int i = 0; i < 8; i++) sb.Append(hash[i].ToString("x2"));
+            _wemNameCachePath = Path.Combine(Path.GetTempPath(), "CUE4ParseCLI_wem_names", $"{sb}.json");
         }
 
         // Dispose old provider if re-initializing
         _provider?.Dispose();
+        _provider = null;
 
+        DefaultFileProvider? newProvider = null;
+        try
+        {
 #pragma warning disable CS0618
-        _provider = new DefaultFileProvider(gameDir, SearchOption.AllDirectories,
-            isCaseInsensitive: true,
-            versions: new VersionContainer(ueVersion));
+            newProvider = new DefaultFileProvider(gameDir, SearchOption.AllDirectories,
+                isCaseInsensitive: true,
+                versions: new VersionContainer(ueVersion));
 #pragma warning restore CS0618
 
-        _provider.Initialize();
+            newProvider.Initialize();
+            _provider = newProvider;
+        }
+        catch
+        {
+            // Initialize failed — dispose the half-built provider before letting
+            // the exception propagate to the caller.
+            try { newProvider?.Dispose(); } catch { /* best effort */ }
+            throw;
+        }
 
         // Register .upk files (UE3 packages) in the VFS — CUE4Parse auto-discovers
         // .uasset/.umap but not .upk, so we manually add them to enable LoadPackage()
@@ -276,7 +542,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Respond(new { type = "warning", message = $"UPK registration: {ex.Message}" });
+            Respond(new { type = "warning", message = $"UPK registration: {SanitizeMessage(ex.Message)}" });
         }
 
         // Load mappings file if provided
@@ -296,11 +562,27 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Respond(new { type = "warning", message = $"Zero key: {ex.Message}" });
+            Respond(new { type = "warning", message = $"Zero key: {SanitizeMessage(ex.Message)}" });
         }
 
-        // Submit user-provided AES keys for encrypted archives
-        var keys = cmd["aes_keys"] as JArray ?? new JArray();
+        // Submit user-provided AES keys for encrypted archives. The aes_keys
+        // entry must be an array; anything else is rejected with a warning so
+        // we don't silently lose keys due to a parent-side bug.
+        JArray keys;
+        var keysToken = cmd["aes_keys"];
+        if (keysToken == null || keysToken.Type == JTokenType.Null)
+        {
+            keys = new JArray();
+        }
+        else if (keysToken is JArray arr)
+        {
+            keys = arr;
+        }
+        else
+        {
+            Respond(new { type = "warning", message = "aes_keys malformed; ignoring" });
+            keys = new JArray();
+        }
         foreach (var k in keys)
         {
             var guid = k.Value<string>("guid") ?? "00000000000000000000000000000000";
@@ -311,13 +593,28 @@ internal static class Program
                 _provider.SubmitKey(new FGuid(guid), new FAesKey(hex));
                 keysSubmitted++;
             }
-            catch (Exception ex)
+            catch (FormatException)
             {
-                Respond(new { type = "warning", message = $"Key {guid}: {ex.Message}" });
+                // Generic message — never echo the raw exception.Message which
+                // may include the malformed key bytes back to the parent.
+                Respond(new { type = "warning", message = $"Key {guid}: invalid (length or format)" });
+            }
+            catch
+            {
+                Respond(new { type = "warning", message = $"Key {guid}: invalid (length or format)" });
             }
         }
 
-        _provider.PostMount();
+        try
+        {
+            _provider.PostMount();
+        }
+        catch
+        {
+            try { _provider?.Dispose(); } catch { /* best effort */ }
+            _provider = null;
+            throw;
+        }
 
         var archiveCount = _provider.MountedVfs.Count;
         var fileCount = _provider.Files.Count;
@@ -350,7 +647,7 @@ internal static class Program
             }
             catch (Exception ex)
             {
-                Respond(new { type = "warning", message = $"Loose file scan: {ex.Message}" });
+                Respond(new { type = "warning", message = $"Loose file scan: {SanitizeMessage(ex.Message)}" });
             }
         }
 
@@ -379,7 +676,11 @@ internal static class Program
         var seenFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var file in _provider!.Files)
+        // Snapshot the live Files dictionary so a concurrent export that mutates
+        // the provider does not raise InvalidOperationException mid-iteration.
+        var filesSnapshot = _provider!.Files.ToArray();
+
+        foreach (var file in filesSnapshot)
         {
             var gamePath = file.Value.Path;
             if (prefix.Length > 0 && !gamePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
@@ -516,7 +817,7 @@ internal static class Program
             }
             catch (Exception ex)
             {
-                failed.Add(new { path = assetPath, error = ex.Message });
+                failed.Add(new { path = assetPath, error = SanitizeMessage(ex.Message) });
             }
         }
 
@@ -583,7 +884,7 @@ internal static class Program
             }
             catch (Exception ex)
             {
-                failed.Add(new { path = assetPath, error = $"{ex.GetType().Name}: {ex.Message}" });
+                failed.Add(new { path = assetPath, error = $"{ex.GetType().Name}: {SanitizeMessage(ex.Message)}" });
             }
         }
 
@@ -594,9 +895,10 @@ internal static class Program
     // ─── Core export logic ────────────────────────────────────────────
     private static bool ExportAsset(string gamePath, string outputDir, Dictionary<string, bool> formats)
     {
-        // Build nested output directory preserving the game path structure
+        // Build nested output directory preserving the game path structure.
+        // gamePath is parent-supplied — SafeJoin rejects "../" traversal.
         var assetDir = Path.GetDirectoryName(gamePath.Replace('/', Path.DirectorySeparatorChar)) ?? "";
-        var nestedOutputDir = Path.Combine(outputDir, assetDir);
+        var nestedOutputDir = SafeJoin(outputDir, assetDir);
         Directory.CreateDirectory(nestedOutputDir);
 
         // For non-UE package files (.wem, .bnk, .bin, etc.), do raw binary export
@@ -681,7 +983,7 @@ internal static class Program
             }
             catch (Exception ex)
             {
-                Respond(new { type = "warning", message = $"{obj.Name} ({obj.ExportType}): {ex.Message}" });
+                Respond(new { type = "warning", message = $"{obj.Name} ({obj.ExportType}): {SanitizeMessage(ex.Message)}" });
             }
 
             // Export props for every object regardless of type
@@ -726,7 +1028,7 @@ internal static class Program
                 ? $"{debugName}_{wemId}"
                 : wemId;
 
-            var wemPath = Path.Combine(nestedOutputDir, $"{baseName}.wem");
+            var wemPath = SafeJoin(nestedOutputDir, $"{baseName}.wem");
             File.WriteAllBytes(wemPath, data);
             var converted = ConvertWithVgmstream(wemPath, nestedOutputDir, _audioFormat);
             if (converted)
@@ -742,7 +1044,7 @@ internal static class Program
         if (lowerName.EndsWith(".ewem"))
         {
             var ewemBase = Path.GetFileNameWithoutExtension(name);
-            var wemPath = Path.Combine(nestedOutputDir, $"{ewemBase}.wem");
+            var wemPath = SafeJoin(nestedOutputDir, $"{ewemBase}.wem");
             File.WriteAllBytes(wemPath, data);
             var converted = ConvertWithVgmstream(wemPath, nestedOutputDir, _audioFormat);
             if (converted)
@@ -755,7 +1057,7 @@ internal static class Program
             return true;
         }
 
-        var outPath = Path.Combine(nestedOutputDir, name);
+        var outPath = SafeJoin(nestedOutputDir, name);
         File.WriteAllBytes(outPath, data);
         return true;
     }
@@ -783,7 +1085,7 @@ internal static class Program
             var name = exporter.MeshLods.Count > 1
                 ? $"{mesh.Name}_LOD{i}{ext}"
                 : $"{mesh.Name}{ext}";
-            var outPath = Path.Combine(outputDir, name);
+            var outPath = SafeJoin(outputDir, name);
             File.WriteAllBytes(outPath, lod.FileData);
             any = true;
         }
@@ -799,12 +1101,12 @@ internal static class Program
         if (_textureFormat == "tga")
         {
             // Export as raw BGRA TGA
-            var outPath = Path.Combine(outputDir, $"{texture.Name}.tga");
+            var outPath = SafeJoin(outputDir, $"{texture.Name}.tga");
             WriteTga(decoded, outPath);
         }
         else
         {
-            var outPath = Path.Combine(outputDir, $"{texture.Name}.png");
+            var outPath = SafeJoin(outputDir, $"{texture.Name}.png");
             using var fs = File.Create(outPath);
             decoded.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100).SaveTo(fs);
         }
@@ -825,7 +1127,23 @@ internal static class Program
         header[16] = 32; // bits per pixel
         header[17] = 0x28; // top-left origin + 8 alpha bits
         fs.Write(header);
-        // Pixel data — BGRA
+
+        // Pixel data — BGRA. Skia's default 8888 layout is BGRA on little-endian
+        // platforms, matching the TGA output we want, so we can write the
+        // backing buffer directly. For other layouts, fall back to per-pixel.
+        if (bmp.ColorType == SkiaSharp.SKColorType.Bgra8888 ||
+            (bmp.ColorType == SkiaSharp.SKColorType.Rgba8888 && BitConverter.IsLittleEndian))
+        {
+            // Bgra8888: bytes are already in B,G,R,A order regardless of endian.
+            if (bmp.ColorType == SkiaSharp.SKColorType.Bgra8888)
+            {
+                fs.Write(bmp.Bytes);
+                return;
+            }
+            // Rgba8888 little-endian: swap R<->B per pixel into a scratch buffer.
+        }
+
+        // Fallback: per-pixel write using GetPixel.
         for (int y = 0; y < h; y++)
         {
             for (int x = 0; x < w; x++)
@@ -854,7 +1172,7 @@ internal static class Program
             var name = exporter.AnimSequences.Count > 1
                 ? $"{anim.Name}_{i}{ext}"
                 : $"{anim.Name}{ext}";
-            var outPath = Path.Combine(outputDir, name);
+            var outPath = SafeJoin(outputDir, name);
             File.WriteAllBytes(outPath, seq.FileData);
             any = true;
         }
@@ -883,7 +1201,7 @@ internal static class Program
                 "OGG" or "OPUS" => "ogg",
                 _ => "wav"
             };
-            var outPath = Path.Combine(outputDir, $"{sound.Name}.{nativeExt}");
+            var outPath = SafeJoin(outputDir, $"{sound.Name}.{nativeExt}");
             File.WriteAllBytes(outPath, data);
             return true;
         }
@@ -895,7 +1213,7 @@ internal static class Program
             "BINKA" => "binka",
             _ => "bin"
         };
-        var tempPath = Path.Combine(outputDir, $"{sound.Name}.{tempExt}");
+        var tempPath = SafeJoin(outputDir, $"{sound.Name}.{tempExt}");
         File.WriteAllBytes(tempPath, data);
 
         var converted = ConvertWithVgmstream(tempPath, outputDir, _audioFormat);
@@ -914,6 +1232,9 @@ internal static class Program
         Formatting = Formatting.Indented,
         ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
         MaxDepth = 64,
+        // Pin TypeNameHandling.None so adversarial $type tokens cannot drive
+        // the serializer to instantiate arbitrary CLR types.
+        TypeNameHandling = TypeNameHandling.None,
         Error = (_, args) => args.ErrorContext.Handled = true
     };
 
@@ -928,19 +1249,10 @@ internal static class Program
 
     private static bool ExportProps(UMaterialInstance mat, string outputDir)
     {
-        string? propsJson = null;
-        var thread = new Thread(() =>
-        {
-            try { propsJson = SerializeUObject(mat); }
-            catch { }
-        }, 4 * 1024 * 1024);
-        thread.IsBackground = true;
-        thread.Start();
-        thread.Join(15_000);
-
+        var propsJson = RunSerializeOnBoundedThread(() => SerializeUObject(mat), 15_000);
         if (propsJson == null) return false;
 
-        var outPath = Path.Combine(outputDir, $"{mat.Name}.props.txt");
+        var outPath = SafeJoin(outputDir, $"{mat.Name}.props.txt");
         File.WriteAllText(outPath, propsJson);
         return true;
     }
@@ -949,27 +1261,17 @@ internal static class Program
     {
         try
         {
-            // Use a bounded-stack thread to prevent StackOverflow on complex objects
-            string? propsJson = null;
-            var thread = new Thread(() =>
-            {
-                try { propsJson = SerializeUObject(obj); }
-                catch { /* serialization failed — propsJson stays null */ }
-            }, 4 * 1024 * 1024);
-            thread.IsBackground = true;
-            thread.Start();
-            thread.Join(15_000);
-
+            var propsJson = RunSerializeOnBoundedThread(() => SerializeUObject(obj), 15_000);
             if (propsJson == null) return false;
 
-            var outPath = Path.Combine(outputDir, $"{obj.Name}.props.txt");
+            var outPath = SafeJoin(outputDir, $"{obj.Name}.props.txt");
             if (!File.Exists(outPath))
                 File.WriteAllText(outPath, propsJson);
             return true;
         }
         catch (Exception ex)
         {
-            Respond(new { type = "warning", message = $"Props export failed for {obj.Name}: {ex.Message}" });
+            Respond(new { type = "warning", message = $"Props export failed for {obj.Name}: {SanitizeMessage(ex.Message)}" });
             return false;
         }
     }
@@ -1008,7 +1310,8 @@ internal static class Program
                 var candidate = Path.Combine(d, name);
                 if (File.Exists(candidate))
                 {
-                    Respond(new { type = "info", message = $"Found Oodle: {candidate}" });
+                    var origin = SameOrUnder(d, AppContext.BaseDirectory) ? "<app-dir>" : "<game-dir>";
+                    Respond(new { type = "info", message = $"Found Oodle in {origin}" });
                     LoadOodle(candidate);
                     return;
                 }
@@ -1031,31 +1334,68 @@ internal static class Program
         }
         catch { }
 
-        // 3. Manual download from OodleUE GitHub releases
+        // 3. Manual download from OodleUE GitHub releases (hash-pinned)
         var targetPath = Path.Combine(cacheDir, "oodle-data-shared.dll");
 
         Respond(new { type = "info", message = "Downloading Oodle decompression library..." });
         try
         {
-            using var http = new HttpClient();
-            http.Timeout = TimeSpan.FromSeconds(30);
-            var url = "https://github.com/WorkingRobot/OodleUE/releases/download/2026-01-25-1223/clang-cl-x64-release.zip";
-            using var response = http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
-            response.EnsureSuccessStatusCode();
-            using var zipStream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
+            // Download the zip into a memory stream so we can verify its hash
+            // before trusting any of its contents.
+            byte[] zipBytes;
+            using (var http = new HttpClient())
+            {
+                http.Timeout = TimeSpan.FromSeconds(30);
+                using var response = http.GetAsync(OodleZipUrl, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
+                response.EnsureSuccessStatusCode();
+                zipBytes = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+            }
+
+            var actualHash = ComputeSha256Hex(zipBytes);
+            if (!string.Equals(actualHash, OodleZipSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                Respond(new { type = "warning", message = $"Oodle download hash mismatch (expected {OodleZipSha256}, got {actualHash}). Refusing to extract." });
+                return;
+            }
+
+            using var zipStream = new MemoryStream(zipBytes, writable: false);
             using var zip = new ZipArchive(zipStream, ZipArchiveMode.Read);
             var entry = zip.GetEntry("bin/oodle-data-shared.dll")
                        ?? throw new FileNotFoundException("oodle-data-shared.dll not found in zip");
-            using var entryStream = entry.Open();
-            using var fs = File.Create(targetPath);
-            entryStream.CopyTo(fs);
-            Respond(new { type = "info", message = $"Downloaded Oodle ({new FileInfo(targetPath).Length} bytes)" });
-            LoadOodle(targetPath);
+            // SafeJoin guards against malicious entry names ("../foo")
+            var safePath = SafeJoin(cacheDir, "oodle-data-shared.dll");
+            using (var entryStream = entry.Open())
+            using (var fs = File.Create(safePath))
+            {
+                entryStream.CopyTo(fs);
+            }
+            Respond(new { type = "info", message = $"Downloaded Oodle ({new FileInfo(safePath).Length} bytes)" });
+            LoadOodle(safePath);
         }
         catch (Exception ex)
         {
-            Respond(new { type = "warning", message = $"Oodle download failed: {ex.Message}. IoStore archives won't decompress." });
+            Respond(new { type = "warning", message = $"Oodle download failed: {SanitizeMessage(ex.Message)}. IoStore archives won't decompress." });
         }
+    }
+
+    /// <summary>True when <paramref name="path"/> is the same as or under <paramref name="other"/>.</summary>
+    private static bool SameOrUnder(string path, string other)
+    {
+        try
+        {
+            var a = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+            var b = Path.GetFullPath(other).TrimEnd(Path.DirectorySeparatorChar);
+            return a.StartsWith(b, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    private static string ComputeSha256Hex(byte[] data)
+    {
+        var hash = System.Security.Cryptography.SHA256.HashData(data);
+        var sb = new System.Text.StringBuilder(hash.Length * 2);
+        foreach (var b in hash) sb.Append(b.ToString("x2"));
+        return sb.ToString();
     }
 
     private static void LoadOodle(string path)
@@ -1067,7 +1407,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Respond(new { type = "warning", message = $"Oodle load failed: {ex.GetType().Name}: {ex.Message}" });
+            Respond(new { type = "warning", message = $"Oodle load failed: {ex.GetType().Name}: {SanitizeMessage(ex.Message)}" });
         }
     }
 
@@ -1091,15 +1431,51 @@ internal static class Program
 
         try
         {
-            using var http = new HttpClient();
-            http.Timeout = TimeSpan.FromSeconds(60);
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("CUE4ParseCLI/1.0");
-            var url = "https://github.com/vgmstream/vgmstream/releases/latest/download/vgmstream-win64.zip";
-            using var resp = http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
-            resp.EnsureSuccessStatusCode();
-            using var zipStream = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
+            // Pinned URL+hash: any drift in the upstream artifact is rejected.
+            byte[] zipBytes;
+            using (var http = new HttpClient())
+            {
+                http.Timeout = TimeSpan.FromSeconds(60);
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("CUE4ParseCLI/1.0");
+                using var resp = http.GetAsync(VgmstreamZipUrl, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
+                resp.EnsureSuccessStatusCode();
+                zipBytes = resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+            }
+
+            var actualHash = ComputeSha256Hex(zipBytes);
+            if (!string.Equals(actualHash, VgmstreamZipSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                Respond(new { type = "warning", message = $"vgmstream download hash mismatch (expected {VgmstreamZipSha256}, got {actualHash}). Refusing to extract." });
+                return;
+            }
+
+            using var zipStream = new MemoryStream(zipBytes, writable: false);
             using var zip = new ZipArchive(zipStream, ZipArchiveMode.Read);
-            zip.ExtractToDirectory(cacheDir, overwriteFiles: true);
+            // Per-entry extraction with SafeJoin protects against zip-slip.
+            foreach (var entry in zip.Entries)
+            {
+                if (string.IsNullOrEmpty(entry.FullName)) continue;
+                // Directory entries end with '/'; create the dir then continue.
+                var isDirectoryEntry = entry.FullName.EndsWith('/') || entry.FullName.EndsWith('\\');
+                string destPath;
+                try { destPath = SafeJoin(cacheDir, entry.FullName); }
+                catch (InvalidOperationException ex)
+                {
+                    Respond(new { type = "warning", message = $"vgmstream zip rejected entry: {SanitizeMessage(ex.Message)}" });
+                    continue;
+                }
+
+                if (isDirectoryEntry)
+                {
+                    Directory.CreateDirectory(destPath);
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                using var entryStream = entry.Open();
+                using var fs = File.Create(destPath);
+                entryStream.CopyTo(fs);
+            }
 
             if (File.Exists(exePath))
             {
@@ -1113,7 +1489,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Respond(new { type = "warning", message = $"vgmstream download failed: {ex.Message}. WEM files won't be converted." });
+            Respond(new { type = "warning", message = $"vgmstream download failed: {SanitizeMessage(ex.Message)}. WEM files won't be converted." });
         }
     }
 
@@ -1124,20 +1500,25 @@ internal static class Program
         if (_vgmstreamPath == null) return false;
 
         var baseName = Path.GetFileNameWithoutExtension(inputPath);
-        // vgmstream always outputs WAV
-        var outPath = Path.Combine(outputDir, $"{baseName}.wav");
+        // vgmstream always outputs WAV. SafeJoin enforces containment in case
+        // baseName carries traversal from an upstream filename.
+        var outPath = SafeJoin(outputDir, $"{baseName}.wav");
 
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = _vgmstreamPath,
-                Arguments = $"-o \"{outPath}\" \"{inputPath}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+            // ArgumentList auto-quotes via CommandLineToArgvW rules, eliminating
+            // the prior $"-o \"{outPath}\" \"{inputPath}\"" injection surface.
+            psi.ArgumentList.Add("-o");
+            psi.ArgumentList.Add(outPath);
+            psi.ArgumentList.Add(inputPath);
 
             using var proc = Process.Start(psi);
             if (proc == null) return false;
@@ -1146,7 +1527,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Respond(new { type = "warning", message = $"vgmstream conversion failed for {Path.GetFileName(inputPath)}: {ex.Message}" });
+            Respond(new { type = "warning", message = $"vgmstream conversion failed for {Path.GetFileName(inputPath)}: {SanitizeMessage(ex.Message)}" });
             return false;
         }
     }
@@ -1175,13 +1556,13 @@ internal static class Program
             foreach (var obj in pkg.GetExports())
             {
                 try { types.Add(new { name = obj.Name, type = obj.GetType().FullName }); }
-                catch (Exception ex) { types.Add(new { name = "?", type = $"Error: {ex.Message}" }); }
+                catch (Exception ex) { types.Add(new { name = "?", type = $"Error: {SanitizeMessage(ex.Message)}" }); }
             }
             Respond(new { type = "inspect_result", path, export_count = types.Count, exports = types });
         }
         catch (Exception ex)
         {
-            RespondError($"Inspect failed for {path}: {ex.Message}");
+            RespondError($"Inspect failed for {path}: {SanitizeMessage(ex.Message)}");
         }
     }
 
@@ -1203,37 +1584,28 @@ internal static class Program
         }
 
         // Use bounded-stack thread to prevent StackOverflowException on complex packages
-        List<object>? exports = null;
-        Exception? loadError = null;
-        var thread = new Thread(() =>
+        var exports = RunOnBoundedThread<List<object>>(() =>
         {
-            try
+            var pkg = _provider!.LoadPackage(path);
+            var result = new List<object>();
+            foreach (var obj in pkg.GetExports())
             {
-                var pkg = _provider!.LoadPackage(path);
-                var result = new List<object>();
-                foreach (var obj in pkg.GetExports())
+                try
                 {
-                    try
+                    result.Add(new
                     {
-                        result.Add(new
-                        {
-                            name = obj.Name,
-                            export_type = obj.ExportType ?? obj.GetType().Name,
-                            outer = obj.Outer?.Name ?? ""
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        result.Add(new { name = "?", export_type = $"Error: {ex.Message}", outer = "" });
-                    }
+                        name = obj.Name,
+                        export_type = obj.ExportType ?? obj.GetType().Name,
+                        outer = obj.Outer?.Name ?? ""
+                    });
                 }
-                exports = result;
+                catch (Exception ex)
+                {
+                    result.Add(new { name = "?", export_type = $"Error: {SanitizeMessage(ex.Message)}", outer = "" });
+                }
             }
-            catch (Exception ex) { loadError = ex; }
-        }, 4 * 1024 * 1024);
-        thread.IsBackground = true;
-        thread.Start();
-        thread.Join(15_000); // 15 second timeout
+            return result;
+        }, 15_000, out var loadError);
 
         if (exports != null)
         {
@@ -1241,7 +1613,8 @@ internal static class Program
         }
         else
         {
-            var errMsg = loadError?.Message ?? "Timed out loading package (too complex)";
+            var errMsg = SanitizeMessage(loadError?.Message) ?? "Timed out loading package (too complex)";
+            if (string.IsNullOrEmpty(errMsg)) errMsg = "Timed out loading package (too complex)";
             Respond(new
             {
                 type = "exports_listed",
@@ -1277,18 +1650,7 @@ internal static class Program
             {
                 try
                 {
-                    // Use a bounded-stack thread (4 MB) to avoid StackOverflowException
-                    // on deeply nested objects (e.g. WWise, complex Blueprints)
-                    string? jsonStr = null;
-                    Exception? serErr = null;
-                    var thread = new Thread(() =>
-                    {
-                        try { jsonStr = SerializeUObject(obj); }
-                        catch (Exception ex) { serErr = ex; }
-                    }, 4 * 1024 * 1024);
-                    thread.IsBackground = true;
-                    thread.Start();
-                    thread.Join(15_000); // 15 second timeout
+                    var jsonStr = RunOnBoundedThread(() => SerializeUObject(obj), 15_000, out var serErr);
 
                     if (jsonStr != null)
                     {
@@ -1302,7 +1664,9 @@ internal static class Program
                     }
                     else
                     {
-                        var errMsg = serErr?.Message ?? "Serialization timed out (object too complex)";
+                        var errMsg = SanitizeMessage(serErr?.Message);
+                        if (string.IsNullOrEmpty(errMsg))
+                            errMsg = "Serialization timed out (object too complex)";
                         exports.Add(new
                         {
                             name = obj.Name,
@@ -1317,7 +1681,7 @@ internal static class Program
                     {
                         name = obj.Name,
                         export_type = "Error",
-                        properties = (object)new { error = ex.Message }
+                        properties = (object)new { error = SanitizeMessage(ex.Message) }
                     });
                 }
             }
@@ -1336,7 +1700,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            RespondError($"GetProps failed for {path}: {ex.Message}");
+            RespondError($"GetProps failed for {path}: {SanitizeMessage(ex.Message)}");
         }
     }
 
@@ -1446,29 +1810,22 @@ internal static class Program
                 {
                     if (obj.ExportType != "AkAudioEvent") continue;
 
-                    // Serialize on a thread with a bounded stack to avoid StackOverflow
-                    // from deeply recursive WWise object graphs
-                    JObject? jObj = null;
-                    Exception? serEx = null;
-                    var thread = new Thread(() =>
+                    // Serialize on a bounded-stack thread to avoid StackOverflow
+                    // from deeply recursive WWise object graphs.
+                    var jObj = RunOnBoundedThread(() =>
                     {
-                        try
+                        var settings = new Newtonsoft.Json.JsonSerializerSettings
                         {
-                            var settings = new Newtonsoft.Json.JsonSerializerSettings
-                            {
-                                Formatting = Formatting.None,
-                                ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
-                                MaxDepth = 48,
-                                Error = (_, args) => args.ErrorContext.Handled = true
-                            };
-                            var json = JsonConvert.SerializeObject(obj, settings);
-                            jObj = JObject.Parse(json);
-                        }
-                        catch (Exception ex) { serEx = ex; }
-                    }, 4 * 1024 * 1024); // 4 MB stack
-                    thread.IsBackground = true;
-                    thread.Start();
-                    thread.Join(10_000); // 10 second timeout
+                            Formatting = Formatting.None,
+                            ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+                            MaxDepth = 48,
+                            // Reject $type tokens — see _propsSettings comment.
+                            TypeNameHandling = TypeNameHandling.None,
+                            Error = (_, args) => args.ErrorContext.Handled = true
+                        };
+                        var json = JsonConvert.SerializeObject(obj, settings);
+                        return JObject.Parse(json);
+                    }, 10_000, out _);
 
                     if (jObj == null) continue;
 
@@ -1519,7 +1876,7 @@ internal static class Program
             }
             catch (Exception ex)
             {
-                Respond(new { type = "warning", message = $"WWise scan: skipped {Path.GetFileName(assetPath)}: {ex.Message}" });
+                Respond(new { type = "warning", message = $"WWise scan: skipped {Path.GetFileName(assetPath)}: {SanitizeMessage(ex.Message)}" });
             }
         }
 
@@ -1566,8 +1923,29 @@ internal static class Program
             var targetName = entry.Value<string>("target_name") ?? "";
             var targetFolder = entry.Value<string>("target_folder") ?? "";
 
+            // Sanitize parent-supplied path components: each folder segment is
+            // run through SanitizeName, traversal segments are rejected, and
+            // SafeJoin enforces containment in outputDir.
+            var safeName = SanitizeName(targetName);
+            if (string.IsNullOrEmpty(safeName))
+            {
+                failed.Add(new { path = wemPath, error = "Invalid target_name" });
+                continue;
+            }
+
+            string safeSubDir;
+            try
+            {
+                safeSubDir = SafeJoinFolderSegments(outputDir, targetFolder);
+            }
+            catch (Exception ex)
+            {
+                failed.Add(new { path = wemPath, error = $"Invalid target_folder: {SanitizeMessage(ex.Message)}" });
+                continue;
+            }
+
             if (current % 10 == 0 || current == total)
-                Respond(new { type = "progress", current, total, message = $"Exporting audio: {targetName}" });
+                Respond(new { type = "progress", current, total, message = $"Exporting audio: {safeName}" });
 
             try
             {
@@ -1577,23 +1955,22 @@ internal static class Program
                     continue;
                 }
 
-                var outSubDir = Path.Combine(outputDir, targetFolder.Replace('/', Path.DirectorySeparatorChar));
-                Directory.CreateDirectory(outSubDir);
+                Directory.CreateDirectory(safeSubDir);
 
-                var wemTempPath = Path.Combine(outSubDir, $"{targetName}.wem");
+                var wemTempPath = SafeJoin(safeSubDir, $"{safeName}.wem");
                 File.WriteAllBytes(wemTempPath, data);
 
-                var converted = ConvertWithVgmstream(wemTempPath, outSubDir, audioFormat);
+                var converted = ConvertWithVgmstream(wemTempPath, safeSubDir, audioFormat);
                 if (converted)
                 {
                     try { File.Delete(wemTempPath); } catch { }
                 }
                 // Keep .wem as fallback if conversion failed
-                succeeded.Add(targetName);
+                succeeded.Add(safeName);
             }
             catch (Exception ex)
             {
-                failed.Add(new { path = wemPath, error = ex.Message });
+                failed.Add(new { path = wemPath, error = SanitizeMessage(ex.Message) });
             }
         }
 
@@ -1642,7 +2019,7 @@ internal static class Program
             }
             catch (Exception ex)
             {
-                Respond(new { type = "warning", message = $"WEM map: skipped {Path.GetFileName(bnkPath)}: {ex.Message}" });
+                Respond(new { type = "warning", message = $"WEM map: skipped {Path.GetFileName(bnkPath)}: {SanitizeMessage(ex.Message)}" });
             }
         }
 
