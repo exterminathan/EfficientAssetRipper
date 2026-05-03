@@ -1,13 +1,20 @@
 """Blender headless processing script.
 
-Launched via:  blender --background --python process_asset.py -- manifest.json
+Launched via:
+    blender --background --python process_asset.py -- manifest.json [--nonce <hex>]
 
 Reads a JSON manifest, imports PSK/PSKX, wires materials, saves .blend.
 Prints structured JSON status lines to stdout for the GUI to parse.
+
+When ``--nonce <hex>`` is supplied, status lines carry the prefix
+``##ASSET_STATUS:<hex>##``.  Without a nonce we fall back to the legacy
+``##ASSET_STATUS##`` prefix so older harnesses still work.
 """
 
+import argparse
 import json
 import os
+import re
 import sys
 import traceback
 
@@ -20,20 +27,112 @@ if "--" in argv:
 else:
     argv = []
 
-if not argv:
-    print(json.dumps({"status": "error", "message": "No manifest path provided"}))
+_parser = argparse.ArgumentParser(prog="process_asset.py", add_help=False)
+_parser.add_argument("manifest", nargs="?", help="Path to JSON manifest")
+_parser.add_argument("--nonce", default="", help="Status-prefix nonce")
+_parser.add_argument(
+    "--status-file",
+    default="",
+    help="Optional path to mirror status lines into (one JSON per line).",
+)
+_args, _unknown = _parser.parse_known_args(argv)
+
+_NONCE_RE = re.compile(r"^[0-9a-fA-F]{8,64}$")
+NONCE = _args.nonce if _args.nonce and _NONCE_RE.match(_args.nonce) else ""
+STATUS_PREFIX = f"##ASSET_STATUS:{NONCE}##" if NONCE else "##ASSET_STATUS##"
+STATUS_FILE = _args.status_file or ""
+
+
+def status_msg(status: str, **kwargs):
+    """Print a JSON status line to stdout (and optional status file)."""
+    msg = {"status": status, **kwargs}
+    line = STATUS_PREFIX + json.dumps(msg)
+    print(line, flush=True)
+    if STATUS_FILE:
+        try:
+            with open(STATUS_FILE, "a", encoding="utf-8") as _sf:
+                _sf.write(json.dumps(msg) + "\n")
+        except OSError:
+            pass
+
+
+if not _args.manifest:
+    status_msg("error", message="No manifest path provided")
     sys.exit(1)
 
-manifest_path = argv[0]
+manifest_path = _args.manifest
 
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = json.load(f)
 
 
-def status_msg(status: str, **kwargs):
-    """Print a JSON status line to stdout."""
-    msg = {"status": status, **kwargs}
-    print("##ASSET_STATUS##" + json.dumps(msg), flush=True)
+# ---------------------------------------------------------------------------
+# Manifest validation (defence in depth — runner already pre-checks).
+# ---------------------------------------------------------------------------
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tga", ".tif", ".tiff", ".exr",
+               ".hdr", ".bmp", ".webp", ".dds"}
+
+
+def _bail(msg: str):
+    status_msg("error", message=msg)
+    sys.exit(1)
+
+
+def _validate_manifest(m: dict):
+    psk_path = m.get("psk_path", "")
+    output_path = m.get("output_path", "")
+    outputs_root = m.get("outputs_root", "")
+
+    if not isinstance(psk_path, str) or not psk_path:
+        _bail("Manifest missing psk_path")
+    if not isinstance(output_path, str) or not output_path:
+        _bail("Manifest missing output_path")
+
+    psk_ext = os.path.splitext(psk_path)[1].lower()
+    if psk_ext not in (".psk", ".pskx"):
+        _bail(f"Manifest psk_path must end in .psk/.pskx (got {psk_ext!r})")
+    if not os.path.isfile(psk_path):
+        _bail(f"Manifest psk_path does not exist: {psk_path}")
+
+    if not os.path.isabs(output_path):
+        _bail(f"Manifest output_path must be absolute: {output_path}")
+    if os.path.splitext(output_path)[1].lower() != ".blend":
+        _bail(f"Manifest output_path must end in .blend: {output_path}")
+
+    if outputs_root:
+        norm_root = os.path.normpath(outputs_root)
+        norm_out = os.path.normpath(output_path)
+        try:
+            common = os.path.commonpath([norm_out, norm_root])
+        except ValueError:
+            common = ""
+        if common != norm_root:
+            _bail(
+                f"Manifest output_path {output_path!r} escapes outputs_root "
+                f"{outputs_root!r}"
+            )
+
+    materials_spec = m.get("materials", {}) or {}
+    for mat_name, spec in materials_spec.items():
+        for slot, tex_info in (spec.get("textures", {}) or {}).items():
+            tex_path = tex_info.get("path", "") if isinstance(tex_info, dict) else ""
+            if not tex_path:
+                _bail(f"Material {mat_name!r} slot {slot!r}: missing texture path")
+            tex_ext = os.path.splitext(tex_path)[1].lower()
+            if tex_ext not in _IMAGE_EXTS:
+                _bail(
+                    f"Material {mat_name!r} slot {slot!r}: unsupported texture "
+                    f"extension {tex_ext!r} ({tex_path})"
+                )
+            if not os.path.isfile(tex_path):
+                _bail(
+                    f"Material {mat_name!r} slot {slot!r}: texture not found "
+                    f"({tex_path})"
+                )
+
+
+_validate_manifest(manifest)
 
 
 # ---------------------------------------------------------------------------
@@ -82,9 +181,19 @@ def main():
     try:
         ext = os.path.splitext(psk_path)[1].lower()
         if ext in (".psk", ".pskx"):
-            bpy.ops.psk.import_file(filepath=psk_path)
+            result = bpy.ops.psk.import_file(filepath=psk_path)
         else:
             status_msg("error", message=f"Unsupported file type: {ext}")
+            sys.exit(1)
+        # bpy.ops returns a set like {"FINISHED"}, {"CANCELLED"}, etc.
+        if "CANCELLED" in (result or set()):
+            status_msg("error", message=f"PSK import cancelled by Blender for {psk_path}")
+            sys.exit(1)
+        if not any(o.type == "MESH" for o in bpy.data.objects):
+            status_msg(
+                "error",
+                message=f"PSK import produced no mesh objects for {psk_path}",
+            )
             sys.exit(1)
         status_msg("progress", step="psk_imported")
     except Exception as e:
@@ -126,7 +235,13 @@ def main():
                 continue
 
             try:
-                setup_material_textures(mat, textures, bsdf_overrides, color_tints)
+                setup_material_textures(
+                    mat,
+                    textures,
+                    bsdf_overrides,
+                    color_tints,
+                    on_warning=lambda m: status_msg("warning", message=m),
+                )
                 processed_materials += 1
                 status_msg("progress", step="material_wired", material=mat_name)
             except Exception as e:
@@ -137,22 +252,25 @@ def main():
     # 5. Remove armature, keep mesh, clean up names
     for obj in list(bpy.data.objects):
         if obj.type == "ARMATURE":
-            # Unparent children first (keep transform)
+            # Capture each child's world matrix before clearing the parent so
+            # the visual transform survives the unparent.  Reading
+            # `child.matrix_world` after `parent = None` would give the new
+            # local matrix, not the world one we wanted to preserve.
             for child in list(obj.children):
+                world = child.matrix_world.copy()
                 child.parent = None
-                child.matrix_world = child.matrix_world  # preserve world transform
+                child.matrix_world = world
             bpy.data.objects.remove(obj, do_unlink=True)
     for arm in list(bpy.data.armatures):
         bpy.data.armatures.remove(arm)
 
     # Strip trailing .001 / .002 etc. from object and mesh names
     for obj in bpy.data.objects:
-        import re as _re
-        cleaned = _re.sub(r"\.\d{3}$", "", obj.name)
+        cleaned = re.sub(r"\.\d{3}$", "", obj.name)
         if cleaned != obj.name:
             obj.name = cleaned
         if obj.data and hasattr(obj.data, "name"):
-            data_cleaned = _re.sub(r"\.\d{3}$", "", obj.data.name)
+            data_cleaned = re.sub(r"\.\d{3}$", "", obj.data.name)
             if data_cleaned != obj.data.name:
                 obj.data.name = data_cleaned
 
@@ -186,11 +304,28 @@ def main():
     # 7. Ensure output directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # 8. Save .blend
+    # 8. Save .blend atomically — write to .tmp, replace on success.
+    tmp_output = output_path + ".tmp"
     try:
-        bpy.ops.wm.save_as_mainfile(filepath=output_path)
+        bpy.ops.wm.save_as_mainfile(filepath=tmp_output)
+        try:
+            tmp_size = os.path.getsize(tmp_output)
+        except OSError:
+            tmp_size = 0
+        if tmp_size <= 0:
+            try:
+                os.unlink(tmp_output)
+            except OSError:
+                pass
+            status_msg("error", message="Saved .blend was empty (0 bytes) — aborting")
+            sys.exit(1)
+        os.replace(tmp_output, output_path)
         status_msg("progress", step="saved")
     except Exception as e:
+        try:
+            os.unlink(tmp_output)
+        except OSError:
+            pass
         status_msg("error", message=f"Failed to save: {e}")
         sys.exit(1)
 
@@ -204,6 +339,8 @@ def main():
 
 try:
     main()
+except SystemExit:
+    raise
 except Exception as e:
     status_msg("error", message=str(e))
     traceback.print_exc()

@@ -25,27 +25,40 @@
         [Environment]::SetEnvironmentVariable("EAR_SYNC_PATH", "D:\Backups\EAR", "User")
 
 .PARAMETER Backup
-    Copy local  →  $env:EAR_SYNC_PATH   (overwrites older files, mirrors deletions)
+    Copy local  →  $env:EAR_SYNC_PATH.  Additive by default; pass -Force to
+    mirror (which deletes archive files that no longer exist locally).
 
 .PARAMETER Restore
-    Copy $env:EAR_SYNC_PATH  →  local   (overwrites older files, mirrors deletions)
+    Copy $env:EAR_SYNC_PATH  →  local.  Always additive — only newer files
+    are copied, nothing on the local side is ever deleted.
 
 .PARAMETER Folders
     Comma-separated list of folders to include.
     Defaults to: profiles, cache
     Pass "all" to include outputs and logs as well.
 
+.PARAMETER Force
+    Required for destructive Backup mirroring (deletes archive files that
+    are not present locally).  Ignored for Restore.
+
+.PARAMETER WhatIf
+    Print what would be copied/deleted without performing any action.
+
 .EXAMPLE
     $env:EAR_SYNC_PATH = "D:\Backups\EAR"
     .\sync.ps1 -Backup
     .\sync.ps1 -Restore
-    .\sync.ps1 -Backup  -Folders all
+    .\sync.ps1 -Backup -Folders all
     .\sync.ps1 -Restore -Folders profiles
+    .\sync.ps1 -Backup -Force            # destructive mirror
+    .\sync.ps1 -Backup -Force -WhatIf    # preview destructive mirror
 #>
 param(
     [switch]$Backup,
     [switch]$Restore,
-    [string]$Folders = "profiles,cache"
+    [string]$Folders = "profiles,cache",
+    [switch]$Force,
+    [switch]$WhatIf
 )
 
 # ── Backup location ──────────────────────────────────────────────────────────
@@ -93,22 +106,51 @@ foreach ($f in $requested) {
 if (-not $Backup -and -not $Restore) {
     Write-Host @"
 Usage:
-  .\sync.ps1 -Backup  [-Folders <list|all>]
-  .\sync.ps1 -Restore [-Folders <list|all>]
+  .\sync.ps1 -Backup  [-Folders <list|all>] [-Force] [-WhatIf]
+  .\sync.ps1 -Restore [-Folders <list|all>] [-WhatIf]
 
 Folders (default: profiles,cache):
 "@
     foreach ($k in $AllFolders.Keys) {
         Write-Host ("  {0,-12} {1}" -f $k, $AllFolders[$k])
     }
+    Write-Host ""
+    Write-Host "Restore is non-destructive: only newer files are pulled in, nothing"
+    Write-Host "on the local side is ever deleted."
+    Write-Host ""
+    Write-Host "Backup is additive by default.  Pass -Force to mirror (which deletes"
+    Write-Host "archive files that no longer exist locally)."
     exit 0
+}
+
+if ($Backup -and $Restore) {
+    Write-Warning "Pass -Backup OR -Restore, not both."
+    exit 1
 }
 
 $direction = if ($Backup) { "Backup  (local → archive)" } else { "Restore (archive → local)" }
 Write-Host ""
 Write-Host "=== EfficientAssetRipper sync — $direction ===" -ForegroundColor Cyan
 Write-Host "Archive : $ArchivePath"
+if ($WhatIf) {
+    Write-Host "Mode    : DRY RUN (no files will be copied or deleted)" -ForegroundColor Yellow
+}
+if ($Backup -and $Force) {
+    Write-Host "Mode    : MIRROR (archive files missing locally will be DELETED)" -ForegroundColor Yellow
+}
 Write-Host ""
+
+# Common robocopy flags:
+# /NP   – no progress percentage (cleaner output)
+# /NFL  – no file list (quieter)
+# /NDL  – no dir list
+# /R:2  – retry twice on locked files
+# /W:1  – wait 1s between retries
+# /XO   – only copy newer source files (skip if dest is newer or same)
+# /MIR  – mirror (additionally deletes dest files missing from source)
+# /E    – include subdirectories, even empty ones
+# /L    – list only (dry run)
+$commonFlags = @("/NP", "/NFL", "/NDL", "/R:2", "/W:1")
 
 foreach ($folder in $requested) {
     if ($Backup) {
@@ -129,21 +171,51 @@ foreach ($folder in $requested) {
 
     Write-Host "  SYNC  $folder" -ForegroundColor Green
 
-    # /MIR  – mirror (adds new, deletes removed)
-    # /NP   – no progress percentage (cleaner output)
-    # /NFL  – no file list (quieter)
-    # /NDL  – no dir list
-    # /R:2  – retry twice on locked files
-    # /W:1  – wait 1s between retries
-    robocopy $src $dst /MIR /NP /NFL /NDL /R:2 /W:1 | Out-Null
+    # Build flag set per direction:
+    #   Restore        → /E /XO   (additive, only newer files)
+    #   Backup         → /E /XO   (additive, only newer files)
+    #   Backup -Force  → /MIR     (full mirror, deletes orphans in archive)
+    if ($Backup -and $Force) {
+        $modeFlags = @("/MIR")
+    } else {
+        $modeFlags = @("/E", "/XO")
+    }
+    if ($WhatIf) {
+        $modeFlags += "/L"
+    }
+
+    $robocopyArgs = @($src, $dst) + $modeFlags + $commonFlags
+    & robocopy @robocopyArgs | Out-Null
 
     $rc = $LASTEXITCODE
-    # robocopy exit codes: 0=no change, 1=files copied, 2=extra files removed,
-    # 3=both, >=8 = error
+    # robocopy exit codes:
+    #   0  no change
+    #   1  files copied
+    #   2  extra files in destination (not in source)
+    #   3  files copied + extras
+    #   >=8 error
+    # We only physically delete extras when -Force /MIR is set.  For the
+    # additive paths (/E /XO) a code 2 means the archive has files the local
+    # side doesn't — surface that as a warning rather than silently leaving
+    # them in place, and require -Force if the user wants them removed.
     if ($rc -ge 8) {
         Write-Warning "  robocopy reported an error for '$folder' (exit code $rc)"
+    }
+    elseif ($Backup -and -not $Force -and ($rc -band 2)) {
+        Write-Warning "  '$folder': archive has extra files not present locally."
+        Write-Warning "  Re-run with -Force to mirror (and DELETE those archive files)."
+    }
+    elseif ($Restore -and ($rc -band 2)) {
+        # For restore, "extras" are local files not in the archive — perfectly
+        # fine, nothing to warn about, but log so the user understands the
+        # additive-restore semantics.
+        Write-Host "        (local has $folder files not in archive — left untouched)" -ForegroundColor DarkGray
     }
 }
 
 Write-Host ""
-Write-Host "Done." -ForegroundColor Cyan
+if ($WhatIf) {
+    Write-Host "Dry run complete — nothing was copied or deleted." -ForegroundColor Cyan
+} else {
+    Write-Host "Done." -ForegroundColor Cyan
+}

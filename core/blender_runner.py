@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -23,6 +24,92 @@ log = logging.getLogger(__name__)
 BLENDER_SCRIPT = str(
     base_dir() / "blender" / "process_asset.py"
 )
+
+
+# Image-file extensions that the Blender script will accept.  Mirrored from
+# blender/process_asset.py so we can reject obviously-bogus manifests before
+# even spawning Blender (defence in depth — the script also validates).
+_IMAGE_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".tga", ".tif", ".tiff", ".exr",
+    ".hdr", ".bmp", ".webp", ".dds",
+})
+
+
+class ManifestValidationError(ValueError):
+    """Raised when a manifest fails the pre-spawn allowlist check."""
+
+
+def _validate_manifest(manifest: dict) -> None:
+    """Cheap allowlist check on a manifest before we hand it to Blender.
+
+    Mirrors the validation inside ``blender/process_asset.py``.  Any
+    inconsistency is raised as :class:`ManifestValidationError` so the caller
+    can surface a meaningful error instead of waiting for a Blender crash.
+    """
+    psk_path = manifest.get("psk_path", "")
+    output_path = manifest.get("output_path", "")
+    outputs_root = manifest.get("outputs_root", "")
+
+    if not isinstance(psk_path, str) or not psk_path:
+        raise ManifestValidationError("manifest missing psk_path")
+    if not isinstance(output_path, str) or not output_path:
+        raise ManifestValidationError("manifest missing output_path")
+
+    psk_ext = os.path.splitext(psk_path)[1].lower()
+    if psk_ext not in (".psk", ".pskx"):
+        raise ManifestValidationError(
+            f"psk_path must end in .psk/.pskx (got {psk_ext!r})"
+        )
+
+    if not os.path.isabs(output_path):
+        raise ManifestValidationError(
+            f"output_path must be absolute: {output_path}"
+        )
+    if os.path.splitext(output_path)[1].lower() != ".blend":
+        raise ManifestValidationError(
+            f"output_path must end in .blend: {output_path}"
+        )
+
+    if outputs_root:
+        norm_root = os.path.normpath(outputs_root)
+        norm_out = os.path.normpath(output_path)
+        try:
+            common = os.path.commonpath([norm_out, norm_root])
+        except ValueError:
+            common = ""
+        if common != norm_root:
+            raise ManifestValidationError(
+                f"output_path {output_path!r} escapes outputs_root "
+                f"{outputs_root!r}"
+            )
+
+    materials_spec = manifest.get("materials", {})
+    if materials_spec is None:
+        materials_spec = {}
+    if not isinstance(materials_spec, dict):
+        raise ManifestValidationError("materials must be a dict")
+    for mat_name, spec in materials_spec.items():
+        textures = (spec or {}).get("textures", {}) or {}
+        if not isinstance(textures, dict):
+            raise ManifestValidationError(
+                f"materials[{mat_name!r}].textures must be a dict"
+            )
+        for slot, tex_info in textures.items():
+            if not isinstance(tex_info, dict):
+                raise ManifestValidationError(
+                    f"materials[{mat_name!r}].textures[{slot!r}] must be a dict"
+                )
+            tex_path = tex_info.get("path", "")
+            if not isinstance(tex_path, str) or not tex_path:
+                raise ManifestValidationError(
+                    f"materials[{mat_name!r}].textures[{slot!r}] missing path"
+                )
+            tex_ext = os.path.splitext(tex_path)[1].lower()
+            if tex_ext not in _IMAGE_EXTS:
+                raise ManifestValidationError(
+                    f"materials[{mat_name!r}].textures[{slot!r}] has "
+                    f"unsupported extension {tex_ext!r}"
+                )
 
 
 # In-memory registry of validated Blender binaries. Keyed by absolute path,
@@ -149,6 +236,22 @@ def run_blender(
         log.error(result.error_message)
         return result
 
+    # Defence-in-depth: reject obviously-bogus manifests before spawning a
+    # subprocess.  The Blender script repeats this check itself.
+    try:
+        _validate_manifest(manifest)
+    except ManifestValidationError as e:
+        result.error_message = f"Manifest validation failed: {e}"
+        log.error(result.error_message)
+        return result
+
+    # Per-run nonce — Blender prepends ``##ASSET_STATUS:<nonce>##`` to status
+    # JSON, and we only parse lines carrying *this* nonce.  Random addon
+    # output (which sometimes mimics a status banner) cannot spoof the wire
+    # format because it doesn't know the nonce.
+    nonce = secrets.token_hex(8)
+    status_prefix = f"##ASSET_STATUS:{nonce}##"
+
     # Write manifest under cache/manifests/ so app uninstall sweeps it
     # (system temp leaks cruft when sessions don't shut down cleanly).
     manifests_dir = base_dir() / "cache" / "manifests"
@@ -167,6 +270,8 @@ def run_blender(
             BLENDER_SCRIPT,
             "--",
             tmp_path,
+            "--nonce",
+            nonce,
         ]
 
         # Sanitize cmd for logging — no secrets currently flow through argv,
@@ -211,16 +316,28 @@ def run_blender(
         result.stderr = stderr or ""
         result.return_code = proc.returncode
 
-        # Parse structured status lines from stdout
+        # Parse structured status lines from stdout.
+        #
+        # We accept either the nonce-prefixed form ``##ASSET_STATUS:<nonce>##``
+        # (the only one a current run's Blender script will emit) or the
+        # legacy ``##ASSET_STATUS##`` form so callers using an older bundled
+        # script keep working.  Random addon output that prints anything
+        # else cannot impersonate a status line.
         for line in stdout.splitlines():
-            if line.startswith("##ASSET_STATUS##"):
-                try:
-                    status = json.loads(line[len("##ASSET_STATUS##"):])
-                    _process_status(status, result)
-                    if on_status:
-                        on_status(status)
-                except json.JSONDecodeError:
-                    pass
+            payload = None
+            if line.startswith(status_prefix):
+                payload = line[len(status_prefix):]
+            elif line.startswith("##ASSET_STATUS##"):
+                payload = line[len("##ASSET_STATUS##"):]
+            if payload is None:
+                continue
+            try:
+                status = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            _process_status(status, result)
+            if on_status:
+                on_status(status)
 
         if proc.returncode == 0 and not result.error_message:
             result.success = True

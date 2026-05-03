@@ -1,3 +1,9 @@
+[project]
+name = "efficient-asset-ripper"
+version = "0.5.0"
+description = "Pipeline for turning Unreal Engine 5 game files into ready-to-use Blender .blend scenes."
+requires-python = ">=3.11,<3.13"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -41,6 +47,6 @@ skip_covered = false
 exclude_lines = [
     "pragma: no cover",
     "raise NotImplementedError",
-    "if __name__ == .__main__.:",
+    "if __name__ == ['\"]__main__['\"]:",
     "if TYPE_CHECKING:",
 ]

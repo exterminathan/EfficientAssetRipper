@@ -40,13 +40,13 @@ if %ERRORLEVEL% neq 0 (
 echo [0/5] Checking dependencies...
 py -m pip show pyinstaller >nul 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo      Installing PyInstaller...
-    py -m pip install pyinstaller
+    echo      Installing build/test dependencies from requirements-dev.txt...
+    py -m pip install -r requirements-dev.txt
 )
 py -m pip show pillow >nul 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo      Installing Pillow...
-    py -m pip install pillow
+    echo      Installing runtime dependencies from requirements.txt...
+    py -m pip install -r requirements.txt
 )
 echo.
 
@@ -77,6 +77,10 @@ set "VERSION_INFO=%BUILD_TEMP%\version_info.txt"
 if not exist "%BUILD_TEMP%" mkdir "%BUILD_TEMP%"
 py "%PROJECT_DIR%tools\make_version_info.py" "%VERSION_INFO%"
 if %ERRORLEVEL% neq 0 (
+    if defined CI (
+        echo ERROR: Failed to generate version_info.txt in CI build.
+        exit /b 1
+    )
     echo WARNING: Failed to generate version_info.txt — building without it.
     set "VERSION_ARG="
 ) else (
@@ -118,12 +122,19 @@ if not exist "%DIST_DIR%\outputs" mkdir "%DIST_DIR%\outputs"
 if not exist "%DIST_DIR%\logs" mkdir "%DIST_DIR%\logs"
 echo.
 
-:: ── Step 4: Build CUE4Parse CLI (optional) ───────────────────────────────────
+:: ── Step 4: Build CUE4Parse CLI (optional locally, REQUIRED in CI) ───────────
 where dotnet >nul 2>nul
 if %ERRORLEVEL% neq 0 (
+    if defined CI (
+        echo [4/5] FAIL — .NET SDK not found in CI build.
+        echo      CI builds must ship CUE4ParseCLI; install .NET 8.0 SDK.
+        exit /b 1
+    )
     echo [4/5] SKIP — .NET SDK not found ^(CUE4ParseCLI not built^)
     echo      Install .NET 8.0 SDK to include CUE4ParseCLI in the build.
+    echo      Marker file written to %DIST_DIR%\CUE4PARSE_CLI_MISSING.txt
     echo.
+    > "%DIST_DIR%\CUE4PARSE_CLI_MISSING.txt" echo CUE4ParseCLI was not bundled with this local build (no .NET SDK on PATH).
     goto :CREATE_ZIP
 )
 
@@ -139,11 +150,24 @@ dotnet publish "%PROJECT_DIR%cue4parse_cli\CUE4ParseCLI.csproj" -c Release -r wi
 if %ERRORLEVEL% neq 0 (
     echo WARNING: CUE4ParseCLI rebuild failed.
     if exist "%PROJECT_DIR%cue4parse_cli\bin\publish\CUE4ParseCLI.exe" (
-        echo          Falling back to the in-tree publish at cue4parse_cli\bin\publish\.
-        if not exist "%DIST_DIR%\cue4parse_cli\bin\publish" mkdir "%DIST_DIR%\cue4parse_cli\bin\publish"
-        xcopy /Y /E /Q "%PROJECT_DIR%cue4parse_cli\bin\publish\*" "%DIST_DIR%\cue4parse_cli\bin\publish\" >nul
+        :: Self-contained single-file publish produces a CUE4ParseCLI.exe
+        :: bigger than ~30 MB; a non-self-contained one is well under 1 MB
+        :: and depends on a system .NET install we may not have.  Refuse
+        :: that fallback rather than silently shipping a broken bundle.
+        for %%S in ("%PROJECT_DIR%cue4parse_cli\bin\publish\CUE4ParseCLI.exe") do set "FALLBACK_SIZE=%%~zS"
+        if !FALLBACK_SIZE! LSS 5000000 (
+            echo          Fallback CUE4ParseCLI.exe is suspiciously small ^(!FALLBACK_SIZE! bytes^).
+            echo          Refusing to bundle a non-self-contained CLI.
+            if defined CI exit /b 1
+        ) else (
+            echo          Falling back to the in-tree publish at cue4parse_cli\bin\publish\.
+            if not exist "%DIST_DIR%\cue4parse_cli\bin\publish" mkdir "%DIST_DIR%\cue4parse_cli\bin\publish"
+            xcopy /Y /E /Q "%PROJECT_DIR%cue4parse_cli\bin\publish\*" "%DIST_DIR%\cue4parse_cli\bin\publish\" >nul
+        )
     ) else (
         echo          No fallback CLI available — bundle will not include CUE4ParseCLI.
+        if defined CI exit /b 1
+        > "%DIST_DIR%\CUE4PARSE_CLI_MISSING.txt" echo CUE4ParseCLI rebuild failed and no fallback was available.
     )
     echo.
     goto :CREATE_ZIP

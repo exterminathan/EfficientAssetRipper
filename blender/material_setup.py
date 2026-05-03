@@ -4,7 +4,59 @@ These functions run INSIDE Blender's Python environment (bpy).
 They build shader node trees based on the wiring spec from the JSON manifest.
 """
 
+import os
+
 import bpy
+
+
+# Image-file extensions we'll feed to bpy.data.images.load.
+# Anything outside this set is rejected with a status warning so an
+# unexpected manifest can't make Blender try to load arbitrary files.
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tga", ".tif", ".tiff", ".exr",
+               ".hdr", ".bmp", ".webp", ".dds"}
+
+
+# Blender 4.x renamed several Principled BSDF input sockets.  When a manifest
+# (or a user's texture_presets.json) still uses the legacy name, translate it
+# to the current one rather than silently dropping the override.
+BSDF_RENAMES = {
+    "Subsurface": "Subsurface Weight",
+    "Specular": "Specular IOR Level",
+    "Transmission": "Transmission Weight",
+    "Sheen": "Sheen Weight",
+    "Clearcoat": "Coat Weight",
+    "ClearcoatRoughness": "Coat Roughness",
+    "Clearcoat Roughness": "Coat Roughness",
+}
+
+
+def _resolve_bsdf_input_name(bsdf, name):
+    """Return the actual BSDF input name to use, applying legacy renames.
+
+    Returns ``None`` if no socket matches even after the rename table — the
+    caller should surface a warning rather than KeyError.
+    """
+    if name in bsdf.inputs:
+        return name
+    renamed = BSDF_RENAMES.get(name)
+    if renamed and renamed in bsdf.inputs:
+        return renamed
+    return None
+
+
+def _mix_input_a(mix_node):
+    """Return the 'A' (first colour) input of a Mix (RGBA) node, by name."""
+    return mix_node.inputs["A"]
+
+
+def _mix_input_b(mix_node):
+    """Return the 'B' (second colour) input of a Mix (RGBA) node, by name."""
+    return mix_node.inputs["B"]
+
+
+def _mix_output_result(mix_node):
+    """Return the 'Result' (Color) output of a Mix (RGBA) node, by name."""
+    return mix_node.outputs["Result"]
 
 
 def clear_material_nodes(mat: bpy.types.Material):
@@ -48,6 +100,7 @@ def setup_material_textures(
     textures: dict,
     bsdf_overrides: dict | None = None,
     color_tints: dict | None = None,
+    on_warning=None,
 ):
     """Wire texture nodes into a material based on the manifest spec.
 
@@ -57,6 +110,8 @@ def setup_material_textures(
         bsdf_overrides: Optional dict of Principled BSDF input overrides
         color_tints: Optional dict of color tint params from material props
                      e.g. {"RColorTint": [R, G, B, A], ...}
+        on_warning: Optional callable(str); called for non-fatal anomalies
+                    (unknown BSDF override, unsupported texture extension).
     """
     bsdf, output = clear_material_nodes(mat)
     tree = mat.node_tree
@@ -65,6 +120,13 @@ def setup_material_textures(
 
     if color_tints is None:
         color_tints = {}
+
+    def _warn(message: str):
+        if on_warning is not None:
+            try:
+                on_warning(message)
+            except Exception:
+                pass
 
     # Track node positions
     x_offset = -800
@@ -81,7 +143,19 @@ def setup_material_textures(
     slot_index = 0
 
     for slot_name, tex_info in textures.items():
-        tex_path = tex_info["path"]
+        raw_tex_path = tex_info["path"]
+        # Normalize the case + separator so duplicate paths resolve to the
+        # same image data-block in Blender's library, and so the suffix check
+        # below isn't fooled by mixed-case extensions on Windows.
+        tex_path = os.path.normcase(os.path.normpath(raw_tex_path))
+        ext = os.path.splitext(tex_path)[1].lower()
+        if ext not in _IMAGE_EXTS:
+            _warn(
+                f"Skipping texture with unsupported extension {ext!r}: "
+                f"{raw_tex_path}"
+            )
+            continue
+
         colorspace = tex_info.get("colorspace", "sRGB")
         wiring = tex_info.get("wiring", {})
         wiring_type = wiring.get("type", "direct")
@@ -101,10 +175,16 @@ def setup_material_textures(
                 pass  # Import texture node but don't wire (e.g. ID masks, height maps)
             elif target == "BASE_COLOR_MIX" and wiring.get("method") == "ao_multiply":
                 ao_channel_infos.append((tex_node, "Color"))
-            elif target in bsdf.inputs:
-                if target not in wired_inputs:
-                    links.new(tex_node.outputs["Color"], bsdf.inputs[target])
-                    wired_inputs.add(target)
+            else:
+                resolved = _resolve_bsdf_input_name(bsdf, target)
+                if resolved is None:
+                    _warn(
+                        f"Material {mat.name!r}: BSDF input {target!r} not "
+                        f"found (Blender version may have renamed it)"
+                    )
+                elif resolved not in wired_inputs:
+                    links.new(tex_node.outputs["Color"], bsdf.inputs[resolved])
+                    wired_inputs.add(resolved)
             if slot_name in ("base_color", "alb"):
                 base_color_tex_node = tex_node
 
@@ -144,10 +224,16 @@ def setup_material_textures(
                 elif target.startswith("NORMAL_"):
                     # Packed normal reconstruction — skip for now, complex
                     pass
-                elif target in bsdf.inputs:
-                    if target not in wired_inputs:
-                        links.new(sep_node.outputs[ch_output], bsdf.inputs[target])
-                        wired_inputs.add(target)
+                else:
+                    resolved = _resolve_bsdf_input_name(bsdf, target)
+                    if resolved is None:
+                        _warn(
+                            f"Material {mat.name!r}: BSDF input {target!r} not "
+                            f"found (Blender version may have renamed it)"
+                        )
+                    elif resolved not in wired_inputs:
+                        links.new(sep_node.outputs[ch_output], bsdf.inputs[resolved])
+                        wired_inputs.add(resolved)
 
         elif wiring_type == "rgb_mask_tint":
             # Separate RGB channels of mask texture, each channel drives a
@@ -193,15 +279,15 @@ def setup_material_textures(
         links.new(ao_mask_tex_node.outputs["Color"], mix_node.inputs["Factor"])
         # A = base color texture output
         if base_source is not None:
-            links.new(base_source, mix_node.inputs[6])
+            links.new(base_source, _mix_input_a(mix_node))
         # B = white (default 1,1,1,1)
-        mix_node.inputs[7].default_value = (1.0, 1.0, 1.0, 1.0)
+        _mix_input_b(mix_node).default_value = (1.0, 1.0, 1.0, 1.0)
 
         # Disconnect any existing Base Color link then wire mix result
         for link in list(tree.links):
             if link.to_node == bsdf and link.to_socket.name == "Base Color":
                 tree.links.remove(link)
-        links.new(mix_node.outputs[2], bsdf.inputs["Base Color"])
+        links.new(_mix_output_result(mix_node), bsdf.inputs["Base Color"])
 
     # Wire AO multiply nodes
     for sep_node, ch_output in ao_channel_infos:
@@ -218,9 +304,9 @@ def setup_material_textures(
             # Factor = 1 (full multiply)
             mix_node.inputs["Factor"].default_value = 1.0
 
-            links.new(base_color_tex_node.outputs["Color"], mix_node.inputs[6])  # A
-            links.new(sep_node.outputs[ch_output], mix_node.inputs[7])            # B
-            links.new(mix_node.outputs[2], bsdf.inputs["Base Color"])             # Result
+            links.new(base_color_tex_node.outputs["Color"], _mix_input_a(mix_node))   # A
+            links.new(sep_node.outputs[ch_output], _mix_input_b(mix_node))            # B
+            links.new(_mix_output_result(mix_node), bsdf.inputs["Base Color"])        # Result
 
     # Wire RGB mask tint chain — each mask channel mixes a tint onto base color
     if mask_tint_infos:
@@ -273,13 +359,13 @@ def setup_material_textures(
             # Factor = mask channel value
             links.new(sep_node.outputs[ch_output], mix_node.inputs["Factor"])
             # A = current accumulated color
-            links.new(current_color_output, mix_node.inputs[6])
+            links.new(current_color_output, _mix_input_a(mix_node))
             # B = tint color (RGB from props, ignore A)
-            mix_node.inputs[7].default_value = (
+            _mix_input_b(mix_node).default_value = (
                 tint_rgba[0], tint_rgba[1], tint_rgba[2], 1.0
             )
 
-            current_color_output = mix_node.outputs[2]  # Result
+            current_color_output = _mix_output_result(mix_node)
 
         # Final chain result → Base Color
         # Remove existing Base Color links first
@@ -292,5 +378,12 @@ def setup_material_textures(
     # Apply BSDF overrides (e.g., Transmission for glass)
     if bsdf_overrides:
         for input_name, value in bsdf_overrides.items():
-            if input_name in bsdf.inputs:
-                bsdf.inputs[input_name].default_value = value
+            resolved = _resolve_bsdf_input_name(bsdf, input_name)
+            if resolved is None:
+                _warn(
+                    f"Material {mat.name!r}: unknown BSDF override "
+                    f"{input_name!r} (no matching socket on this Blender "
+                    f"version)"
+                )
+                continue
+            bsdf.inputs[resolved].default_value = value

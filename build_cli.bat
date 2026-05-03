@@ -20,7 +20,9 @@ set "FINAL_DIR=%~dp0cue4parse_cli\bin\publish"
 echo [1/2] Building and publishing Release...
 echo      (intermediate files in %%TEMP%% to avoid Google Drive locks)
 cd /d "%~dp0cue4parse_cli"
-dotnet publish -c Release -r win-x64 --self-contained false -o "%PUBLISH_DIR%" -p:BaseIntermediateOutputPath=%OBJ_DIR%\ -p:BaseOutputPath=%BIN_DIR%\
+:: --self-contained true matches the path used by build.bat / the shipped
+:: artifact, so dev rebuilds produce the same single-file exe end users get.
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o "%PUBLISH_DIR%" -p:BaseIntermediateOutputPath=%OBJ_DIR%\ -p:BaseOutputPath=%BIN_DIR%\
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Build failed.
     pause

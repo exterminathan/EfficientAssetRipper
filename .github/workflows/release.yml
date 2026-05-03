@@ -5,26 +5,56 @@ on:
     tags:
       - "v*.*.*"
 
+# Default to read-only at the workflow level; the publish job opts into
+# the writes it needs.
 permissions:
-  contents: write   # needed by softprops/action-gh-release
+  contents: read
+
+# Avoid concurrent release runs for the same ref clobbering each other,
+# but never cancel an in-flight release — a half-published tag is worse
+# than a slow queue.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: windows-latest
     timeout-minutes: 30
+    environment: release
+    permissions:
+      # contents: write — softprops/action-gh-release publishes assets.
+      # id-token / attestations: write — actions/attest-build-provenance.
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0  # need full history for the ancestor check below
+
+      - name: Verify tag is an ancestor of main
+        # Refuse to publish if the tag points at a commit that isn't on main.
+        # Stops accidentally-tagged feature branches from shipping as a release.
+        shell: pwsh
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor ${{ github.sha }} origin/main
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Tag ${{ github.ref_name }} (${{ github.sha }}) is not an ancestor of origin/main."
+            exit 1
+          }
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.11"
           cache: pip
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@3951f0dfe7a07e2313ec93c75700083e2005cbab # v4.3.0
         with:
           dotnet-version: "8.0.x"
 
@@ -32,7 +62,6 @@ jobs:
         run: |
           py -m pip install --upgrade pip
           py -m pip install -r requirements.txt -r requirements-dev.txt
-          py -m pip install pyinstaller
 
       - name: Run fast test tiers
         run: py -m pytest -q -m "not slow and not requires_blender and not requires_everything and not requires_dotnet_cli" --maxfail=1
@@ -48,32 +77,88 @@ jobs:
           if (-not (Test-Path $zip)) { throw "ZIP not found at $zip" }
           if ((Get-Item $zip).Length -lt 1MB) { throw "ZIP suspiciously small" }
 
+      - name: Generate SHA256SUMS
+        shell: pwsh
+        run: |
+          $zip = "dist\EfficientAssetRipper-win-x64.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          # Use Unix-style line endings + no BOM so consumers can verify with
+          # `sha256sum -c` on Linux/Mac.
+          $line = "$hash  $(Split-Path -Leaf $zip)`n"
+          [System.IO.File]::WriteAllText("dist\SHA256SUMS", $line, [System.Text.UTF8Encoding]::new($false))
+          Get-Content dist\SHA256SUMS
+
+      - name: Attest build provenance
+        # Records a signed statement linking the artifact to the workflow run
+        # that produced it.  Verifiable later with `gh attestation verify`.
+        uses: actions/attest-build-provenance@520d128f165991a6c774bcb264f323e3d70747f4 # v2.2.0
+        with:
+          subject-path: dist/EfficientAssetRipper-win-x64.zip
+
       - name: Extract changelog block for this tag
         id: changelog
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $version = $tag.TrimStart("v")
+          # `TrimStart` takes a CHARACTER SET, not a prefix — "v0.5.0".TrimStart("v")
+          # would also strip a leading 'v' anywhere up to the first non-v.
+          # Use an explicit prefix check instead.
+          if ($tag.StartsWith("v")) {
+            $version = $tag.Substring(1)
+          } else {
+            $version = $tag
+          }
           $text = Get-Content -Raw -Encoding UTF8 CHANGELOG.md
           # Match "## [<version>]" up to the next "## [" header (or EOF).
           $pattern = "(?ms)^##\s+\[" + [regex]::Escape($version) + "\][^\n]*\n(.*?)(?=^##\s+\[|\z)"
           $m = [regex]::Match($text, $pattern)
           if (-not $m.Success) {
-            Write-Warning "No CHANGELOG entry found for $version — using fallback body"
-            $body = "Release $tag. See [CHANGELOG.md](CHANGELOG.md) for details."
-          } else {
-            $body = $m.Groups[1].Value.Trim()
+            Write-Error "No CHANGELOG entry found for $version — refusing to publish a release with an empty body."
+            exit 1
           }
-          # Write to a file because multiline outputs over $env:GITHUB_OUTPUT
+          $body = $m.Groups[1].Value.Trim()
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            Write-Error "CHANGELOG block for $version is empty."
+            exit 1
+          }
+          # Append a Verify section so users can independently confirm the
+          # download against the provenance attestation we just emitted.
+          $owner = "${{ github.repository_owner }}"
+          $fence = '```'
+          $verify = @(
+            "",
+            "***",
+            "",
+            "### Verify this release",
+            "",
+            "Each release ZIP ships with a SHA256 checksum and a build-provenance",
+            "attestation.  After downloading both files you can verify:",
+            "",
+            "$fence`sh",
+            "# 1. Confirm the ZIP matches the published checksum.",
+            "sha256sum --check SHA256SUMS",
+            "",
+            "# 2. Confirm the ZIP was produced by this repository's release workflow.",
+            "gh attestation verify EfficientAssetRipper-win-x64.zip --owner $owner",
+            "$fence",
+            ""
+          ) -join "`n"
+          $body = $body + $verify
+          # Write to a file because multiline outputs over `$env:GITHUB_OUTPUT`
           # need the EOF-delimiter dance and this is simpler.
           $body | Out-File -FilePath release_body.md -Encoding UTF8
           Write-Host "Release body written to release_body.md ($([System.Text.Encoding]::UTF8.GetByteCount($body)) bytes)"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           name: ${{ github.ref_name }}
           body_path: release_body.md
-          files: dist/EfficientAssetRipper-win-x64.zip
+          files: |
+            dist/EfficientAssetRipper-win-x64.zip
+            dist/SHA256SUMS
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Treat tags carrying an explicit pre-release suffix (alpha/beta/
+          # rc/pre/dev) as pre-releases.  Old logic used a bare `-`, which
+          # matched anything with a hyphen — including ad-hoc dated tags.
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-pre') || contains(github.ref_name, '-dev') }}

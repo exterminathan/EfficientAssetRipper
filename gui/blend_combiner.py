@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import subprocess
 import tempfile
 from pathlib import Path
@@ -68,6 +69,9 @@ class CombineWorker(QThread):
         }
 
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="ear_combine_")
+        # Per-run nonce — only status lines carrying this nonce are trusted.
+        nonce = secrets.token_hex(8)
+        status_prefix = f"##COMBINE_STATUS:{nonce}##"
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=2)
@@ -77,6 +81,7 @@ class CombineWorker(QThread):
                 "--background",
                 "--python", COMBINE_SCRIPT,
                 "--", tmp_path,
+                "--nonce", nonce,
             ]
 
             # Merge stderr into stdout so a chatty Blender process can't
@@ -94,14 +99,20 @@ class CombineWorker(QThread):
             tail: list[str] = []  # last few lines for error reporting
             for line in proc.stdout:
                 line = line.strip()
-                if not line.startswith("##COMBINE_STATUS##"):
+                # Accept both the nonce-prefixed status (current scripts) and
+                # the legacy ##COMBINE_STATUS## prefix (older bundled scripts).
+                if line.startswith(status_prefix):
+                    payload = line[len(status_prefix):]
+                elif line.startswith("##COMBINE_STATUS##"):
+                    payload = line[len("##COMBINE_STATUS##"):]
+                else:
                     if line:
                         tail.append(line)
                         if len(tail) > 20:
                             del tail[0]
                     continue
                 try:
-                    data = json.loads(line[len("##COMBINE_STATUS##"):])
+                    data = json.loads(payload)
                 except json.JSONDecodeError:
                     continue
 
