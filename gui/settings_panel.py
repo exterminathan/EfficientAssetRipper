@@ -1,4 +1,9 @@
-"""Settings dialog for configuring paths, timeouts, presets, and appearance."""
+"""Settings dialog for configuring global paths, timeouts, presets, and appearance.
+
+Per-profile paths (game folder, mounted folder, output folder) live in the
+profile JSON and are edited via the Manage Profiles dialog — this dialog only
+covers global tooling paths shared across every profile.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -40,46 +44,8 @@ from gui.color_schemes import (
     list_scheme_names,
     register_custom_scheme,
 )
+from gui.widgets import PathPicker
 import gui.theme as theme
-
-
-class PathPicker(QWidget):
-    """A line-edit + browse button for picking files or folders."""
-
-    changed = Signal(str)
-
-    def __init__(self, mode: str = "folder", filter_str: str = "", parent=None):
-        super().__init__(parent)
-        self._mode = mode
-        self._filter = filter_str
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.line_edit = QLineEdit()
-        self.line_edit.textChanged.connect(self.changed.emit)
-        layout.addWidget(self.line_edit)
-
-        btn = QPushButton("Browse...")
-        btn.setFixedWidth(80)
-        btn.clicked.connect(self._browse)
-        layout.addWidget(btn)
-
-    def _browse(self):
-        if self._mode == "folder":
-            path = QFileDialog.getExistingDirectory(self, "Select Folder")
-        else:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Select File", "", self._filter
-            )
-        if path:
-            self.line_edit.setText(path)
-
-    def text(self) -> str:
-        return self.line_edit.text()
-
-    def setText(self, text: str):
-        self.line_edit.setText(text)
 
 
 class SettingsDialog(QDialog):
@@ -103,28 +69,27 @@ class SettingsDialog(QDialog):
         scroll.setWidget(scroll_widget)
         outer.addWidget(scroll, stretch=1)
 
-        # --- Paths group ---
-        paths_group = QGroupBox("Paths")
+        # --- Tooling paths (global; per-profile paths live in Manage Profiles) ---
+        paths_group = QGroupBox("Tooling Paths")
         paths_form = QFormLayout(paths_group)
-
-        self.game_folder = PathPicker(mode="folder")
-        self.game_folder.setText(config.get("game_folder"))
-        paths_form.addRow("Game Folder:", self.game_folder)
+        paths_group.setToolTip(
+            "These paths apply to every profile. Per-profile paths "
+            "(Game folder / Mounted folder / Output folder) are edited under "
+            "Manage Profiles."
+        )
 
         self.blender_exe = PathPicker(
-            mode="file", filter_str="Blender (blender.exe);;All Files (*)"
+            mode="file", filter_str="Blender (blender.exe);;All Files (*)",
+            title="Select Blender Executable",
         )
         self.blender_exe.setText(
             config.get("blender_exe") or self._auto_detect_blender()
         )
         paths_form.addRow("Blender Executable:", self.blender_exe)
 
-        self.output_dir = PathPicker(mode="folder")
-        self.output_dir.setText(config.get("output_dir"))
-        paths_form.addRow("Output Directory:", self.output_dir)
-
         self.everything_dll = PathPicker(
-            mode="file", filter_str="DLL Files (*.dll);;All Files (*)"
+            mode="file", filter_str="DLL Files (*.dll);;All Files (*)",
+            title="Select Everything SDK DLL",
         )
         self.everything_dll.setText(
             config.get("everything_dll") or self._auto_detect_everything()
@@ -132,10 +97,18 @@ class SettingsDialog(QDialog):
         paths_form.addRow("Everything SDK DLL:", self.everything_dll)
 
         self.presets_path = PathPicker(
-            mode="file", filter_str="JSON Files (*.json);;All Files (*)"
+            mode="file", filter_str="JSON Files (*.json);;All Files (*)",
+            title="Select Texture Presets JSON",
         )
         self.presets_path.setText(str(config.get_presets_path()))
         paths_form.addRow("Texture Presets JSON:", self.presets_path)
+
+        self.cue4parse_cli = PathPicker(
+            mode="file", filter_str="Executable (CUE4ParseCLI.exe);;All Files (*)",
+            title="Select CUE4Parse CLI",
+        )
+        self.cue4parse_cli.setText(config.get("cue4parse_cli"))
+        paths_form.addRow("CUE4Parse CLI:", self.cue4parse_cli)
 
         layout.addWidget(paths_group)
 
@@ -153,22 +126,6 @@ class SettingsDialog(QDialog):
         proc_form.addRow("Timeout per Asset:", self.timeout)
 
         layout.addWidget(proc_group)
-
-        # --- Unpacker / CUE4Parse group ---
-        unpack_group = QGroupBox("Unpacker (CUE4ParseCLI)")
-        unpack_form = QFormLayout(unpack_group)
-
-        self.cue4parse_cli = PathPicker(
-            mode="file", filter_str="Executable (CUE4ParseCLI.exe);;All Files (*)"
-        )
-        self.cue4parse_cli.setText(config.get("cue4parse_cli"))
-        unpack_form.addRow("CUE4Parse CLI:", self.cue4parse_cli)
-
-        self.unpack_output_dir = PathPicker(mode="folder")
-        self.unpack_output_dir.setText(config.get("unpack_output_dir"))
-        unpack_form.addRow("Unpack Output Dir:", self.unpack_output_dir)
-
-        layout.addWidget(unpack_group)
 
         # --- Export Formats group ---
         fmt_group = QGroupBox("Export Formats")
@@ -262,8 +219,8 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
-    # Path-typed settings: keys checked for existence on save (folder vs file).
-    _PATH_FIELDS_FOLDER = ("game_folder", "output_dir", "unpack_output_dir")
+    # Path-typed settings: keys checked for existence on save (file only —
+    # folder fields all moved to per-profile JSON).
     _PATH_FIELDS_FILE = ("blender_exe", "everything_dll", "cue4parse_cli")
 
     def _confirm_missing_path(self, label: str, value: str) -> bool:
@@ -280,9 +237,6 @@ class SettingsDialog(QDialog):
     def _validate_paths(self) -> bool:
         """Return False if the user cancels at any non-existent path prompt."""
         checks: list[tuple[str, str, str]] = [  # (label, value, kind)
-            ("Game Folder", self.game_folder.text().strip(), "folder"),
-            ("Output Directory", self.output_dir.text().strip(), "folder"),
-            ("Unpack Output Dir", self.unpack_output_dir.text().strip(), "folder"),
             ("Blender Executable", self.blender_exe.text().strip(), "file"),
             ("Everything SDK DLL", self.everything_dll.text().strip(), "file"),
             ("CUE4Parse CLI", self.cue4parse_cli.text().strip(), "file"),
@@ -305,9 +259,7 @@ class SettingsDialog(QDialog):
         if not self._validate_paths():
             return
 
-        config.set("game_folder", self.game_folder.text())
         config.set("blender_exe", self.blender_exe.text())
-        config.set("output_dir", self.output_dir.text())
         config.set("everything_dll", self.everything_dll.text())
         # Presets path: a non-bundled location is allowed but requires a
         # one-time confirmation so a stray file substitution can't sneak in
@@ -338,7 +290,6 @@ class SettingsDialog(QDialog):
         config.set("psk_addon_name", self.addon_name.text())
         config.set("timeout_seconds", self.timeout.value())
         config.set("cue4parse_cli", self.cue4parse_cli.text())
-        config.set("unpack_output_dir", self.unpack_output_dir.text())
         config.set("export_texture_format", self.texture_format.currentText())
         config.set("export_audio_format", self.audio_format.currentText())
 
@@ -517,14 +468,19 @@ class SettingsDialog(QDialog):
         self._test_output.clear()
         results: list[tuple[str, bool, str]] = []  # (test_name, passed, detail)
 
-        # 1. Game folder
-        gf = self.game_folder.text()
+        # 1. Active profile's game folder (sourced from config — set by the
+        # Manage Profiles dialog and on profile load).
+        gf = config.get("game_folder")
         if gf and os.path.isdir(gf):
-            results.append(("Game Folder", True, gf))
+            results.append(("Active profile · Game folder", True, gf))
         elif gf:
-            results.append(("Game Folder", False, f"Directory not found: {gf}"))
+            results.append(("Active profile · Game folder", False, f"Directory not found: {gf}"))
         else:
-            results.append(("Game Folder", False, "Not set"))
+            results.append((
+                "Active profile · Game folder",
+                False,
+                "Not set — open Manage Profiles to configure",
+            ))
 
         # 2. Blender exe
         be = self.blender_exe.text()
@@ -546,21 +502,7 @@ class SettingsDialog(QDialog):
         else:
             results.append(("Blender", False, "Not set"))
 
-        # 3. Output dir
-        od = self.output_dir.text()
-        if od and os.path.isdir(od):
-            results.append(("Output Directory", True, od))
-        elif od:
-            # Try to create it
-            try:
-                os.makedirs(od, exist_ok=True)
-                results.append(("Output Directory", True, f"Created: {od}"))
-            except Exception as e:
-                results.append(("Output Directory", False, f"Cannot create: {e}"))
-        else:
-            results.append(("Output Directory", False, "Not set"))
-
-        # 4. Everything SDK
+        # 3. Everything SDK
         dll_path = self.everything_dll.text()
         if dll_path and os.path.isfile(dll_path):
             results.append(("Everything DLL", True, f"Found: {dll_path}"))
@@ -573,7 +515,7 @@ class SettingsDialog(QDialog):
                 ok, msg = sdk.test_connection()
                 results.append(("Everything IPC", ok, msg))
 
-                # Test folder search if game folder is set
+                # Test folder search if active profile's game folder is set
                 if ok and gf and os.path.isdir(gf):
                     count, msg = sdk.test_folder_search(gf)
                     results.append(("Folder Search", count > 0, msg))

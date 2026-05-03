@@ -1,4 +1,7 @@
-"""Tests for `gui.profile_bar.ProfileBar`."""
+"""Tests for `gui.profile_bar.ProfileBar`.
+
+ProfileBar is now a thin combo + Manage button — CRUD moved to ProfileDialog.
+"""
 
 from __future__ import annotations
 
@@ -68,3 +71,15 @@ def test_refresh_falls_back_to_first_profile_when_no_select(qtbot, tmp_profiles_
     bar.refresh()  # no select arg
     assert bar._active_profile in ("Alpha", "Beta")
     assert bar.current_profile() == bar._active_profile
+
+
+def test_manage_button_emits_manage_requested(qtbot, tmp_profiles_dir):
+    """The Manage Profiles button should emit `manage_requested`."""
+    pm = ProfileManager()
+    pm.create_profile("Alpha", {})
+    bar = ProfileBar(pm)
+    qtbot.addWidget(bar)
+    bar.refresh()
+
+    with qtbot.waitSignal(bar.manage_requested, timeout=1000):
+        bar.manage_requested.emit()

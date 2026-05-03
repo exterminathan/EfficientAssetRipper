@@ -175,7 +175,7 @@ class UnpackerPanel(QWidget):
         mount_layout = QVBoxLayout()
 
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Game Dir:"))
+        row1.addWidget(QLabel("Game folder:"))
         self._game_dir_edit = QLineEdit()
         self._game_dir_edit.setPlaceholderText("Path to game content folder (.pak, .upk, or loose content files)")
         row1.addWidget(self._game_dir_edit)
@@ -301,9 +301,9 @@ class UnpackerPanel(QWidget):
         export_layout = QVBoxLayout(export_group)
 
         out_row = QHBoxLayout()
-        out_row.addWidget(QLabel("Output:"))
+        out_row.addWidget(QLabel("Mounted Folder:"))
         self._output_dir_edit = QLineEdit()
-        self._output_dir_edit.setPlaceholderText("Where to save extracted files")
+        self._output_dir_edit.setPlaceholderText("Where mounted/exported files land — also where PSK Picker reads from")
         self._output_dir_edit.setText(config.get("unpack_output_dir"))
         out_row.addWidget(self._output_dir_edit)
         self._browse_output_btn = QPushButton("Browse...")

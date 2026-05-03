@@ -210,3 +210,39 @@ def test_load_profile_resets_aes_keys_when_corrupt(tmp_profiles_dir):
     (tmp_profiles_dir / "Bad.json").write_text(json.dumps(bad), encoding="utf-8")
     loaded = pm.load_profile("Bad")
     assert loaded["aes_keys"] == []
+
+
+def test_auto_save_paths_round_trip(tmp_profiles_dir):
+    """The new auto_save_paths flag must persist as a real bool."""
+    pm = ProfileManager()
+    pm.create_profile("OptIn", {"auto_save_paths": True})
+    loaded = pm.load_profile("OptIn")
+    assert loaded["auto_save_paths"] is True
+
+    pm.save_profile("OptIn", {**loaded, "auto_save_paths": False})
+    loaded_back = pm.load_profile("OptIn")
+    assert loaded_back["auto_save_paths"] is False
+
+
+def test_auto_save_paths_defaults_false_when_absent(tmp_profiles_dir):
+    """Existing profiles missing the field should load with the default."""
+    pm = ProfileManager()
+    pm.create_profile("Legacy", {})
+    legacy = json.loads((tmp_profiles_dir / "Legacy.json").read_text(encoding="utf-8"))
+    legacy.pop("auto_save_paths", None)
+    (tmp_profiles_dir / "Legacy.json").write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = pm.load_profile("Legacy")
+    assert loaded["auto_save_paths"] is False
+
+
+def test_auto_save_paths_coerces_truthy_int_to_bool(tmp_profiles_dir):
+    """If a profile JSON has auto_save_paths=1 (legacy/manual edit), coerce to True."""
+    pm = ProfileManager()
+    pm.create_profile("Coerce", {})
+    raw = json.loads((tmp_profiles_dir / "Coerce.json").read_text(encoding="utf-8"))
+    raw["auto_save_paths"] = 1
+    (tmp_profiles_dir / "Coerce.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = pm.load_profile("Coerce")
+    assert loaded["auto_save_paths"] is True

@@ -2,9 +2,71 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QModelIndex
+from PySide6.QtCore import Qt, QModelIndex, Signal
 from PySide6.QtGui import QMouseEvent, QWheelEvent
-from PySide6.QtWidgets import QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+class PathPicker(QWidget):
+    """A line-edit + Browse button for picking files or folders.
+
+    Emits ``changed`` whenever the line edit text changes (Browse and manual
+    typing both fire it). ``mode='folder'`` shows a directory dialog;
+    ``mode='file'`` shows a file dialog with the optional filter string.
+    """
+
+    changed = Signal(str)
+
+    def __init__(
+        self,
+        mode: str = "folder",
+        filter_str: str = "",
+        title: str = "",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._mode = mode
+        self._filter = filter_str
+        self._title = title or ("Select Folder" if mode == "folder" else "Select File")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.line_edit = QLineEdit()
+        self.line_edit.textChanged.connect(self.changed.emit)
+        layout.addWidget(self.line_edit)
+
+        btn = QPushButton("Browse...")
+        btn.setFixedWidth(80)
+        btn.clicked.connect(self._browse)
+        layout.addWidget(btn)
+
+    def _browse(self):
+        start = self.line_edit.text().strip()
+        if self._mode == "folder":
+            path = QFileDialog.getExistingDirectory(self, self._title, start)
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, self._title, start, self._filter)
+        if path:
+            self.line_edit.setText(path)
+
+    def text(self) -> str:
+        return self.line_edit.text()
+
+    def setText(self, text: str):
+        self.line_edit.setText(text)
+
+    def setPlaceholderText(self, text: str):
+        self.line_edit.setPlaceholderText(text)
 
 
 class ZoomableTree(QTreeWidget):

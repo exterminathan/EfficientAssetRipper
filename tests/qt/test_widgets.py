@@ -6,7 +6,7 @@ import pytest
 
 from PySide6.QtWidgets import QVBoxLayout, QLabel
 
-from gui.widgets import CollapsibleSection, ZoomableTree
+from gui.widgets import CollapsibleSection, PathPicker, ZoomableTree
 
 pytestmark = pytest.mark.qt
 
@@ -38,3 +38,35 @@ def test_collapsible_section_set_content_layout(qtbot):
     inner.addWidget(QLabel("hello"))
     sec.set_content_layout(inner)
     assert sec._content.layout() is inner
+
+
+def test_path_picker_setText_text_round_trip(qtbot):
+    p = PathPicker(mode="folder")
+    qtbot.addWidget(p)
+    p.setText(r"C:\Picked")
+    assert p.text() == r"C:\Picked"
+
+
+def test_path_picker_emits_changed_signal(qtbot):
+    p = PathPicker(mode="folder")
+    qtbot.addWidget(p)
+    with qtbot.waitSignal(p.changed, timeout=1000) as sig:
+        p.setText(r"C:\NewPath")
+    assert sig.args == [r"C:\NewPath"]
+
+
+def test_path_picker_browse_file_mode_uses_open_file_dialog(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+
+    captured: dict = {}
+
+    def _fake(parent, title, start, filt):
+        captured["called"] = (parent, title, start, filt)
+        return (r"C:\From\Mock\file.exe", filt)
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(_fake))
+    p = PathPicker(mode="file", filter_str="Exe (*.exe)")
+    qtbot.addWidget(p)
+    p._browse()
+    assert captured.get("called") is not None
+    assert p.text() == r"C:\From\Mock\file.exe"

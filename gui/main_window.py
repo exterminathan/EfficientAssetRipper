@@ -288,9 +288,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._profile_bar.profile_switch_requested.connect(self._switch_profile)
-        self._profile_bar.profile_created.connect(self._on_profile_created)
-        self._profile_bar.profile_deleted.connect(self._on_profile_deleted)
-        self._profile_bar.profile_renamed.connect(self._on_profile_renamed)
+        self._profile_bar.manage_requested.connect(self._open_profile_dialog)
         main_layout.addWidget(self._profile_bar)
 
         # ── Main content area ─────────────────────────────────────────
@@ -722,7 +720,14 @@ class MainWindow(QMainWindow):
             self._cancel_processing()
 
     def _save_current_profile(self):
-        """Persist the current UI state into the active profile JSON."""
+        """Persist the current UI state into the active profile JSON.
+
+        Path fields from the Unpacker tab (game_dir / unpack_output_dir /
+        ue_version / mappings_path / aes_keys) are written back only when the
+        profile has ``auto_save_paths`` enabled. Otherwise the on-disk profile
+        is the source of truth and the Unpacker tab is purely a session-local
+        editor — see the Manage Profiles dialog to mutate path fields.
+        """
         name = self._current_profile_name
         if not name:
             return
@@ -732,14 +737,20 @@ class MainWindow(QMainWindow):
         except FileNotFoundError:
             data = {}
 
-        # Merge unpacker + picker state
-        data.update(self._unpacker_panel.collect_for_profile())
+        # Always merge picker state (psk_processed) — that's a record of work
+        # done, not a path the user is editing.
         data.update(self._psk_picker.collect_for_profile())
 
-        # Also update blender_output_dir from global config (legacy bridge)
+        # Path fields: only auto-merge when explicitly opted-in per profile.
+        if data.get("auto_save_paths", False):
+            data.update(self._unpacker_panel.collect_for_profile())
+
+        # blender_output_dir falls back to the legacy global key for users
+        # who haven't yet set it via Manage Profiles.
         data["blender_output_dir"] = data.get("blender_output_dir", "") or config.get("output_dir")
 
-        # Scan cache file
+        # Scan cache file is keyed by the saved game_dir, not whatever the
+        # Unpacker tab has typed in right now.
         game_dir = data.get("game_dir", "")
         if game_dir:
             import hashlib
@@ -751,6 +762,60 @@ class MainWindow(QMainWindow):
 
         self._profile_manager.save_profile(name, data)
         log.debug("Saved profile: %s", name)
+
+    def _open_profile_dialog(self):
+        """Open the Manage Profiles dialog and react to its outcomes."""
+        from gui.profile_dialog import ProfileDialog
+
+        # Save in-flight state first so it isn't lost if the user renames /
+        # deletes the active profile.
+        self._save_current_profile()
+
+        dlg = ProfileDialog(
+            self._profile_manager,
+            current_profile=self._current_profile_name,
+            parent=self,
+        )
+
+        # Track outcomes so we can surface the right log line + reload state.
+        renames: list[tuple[str, str]] = []
+        creates: list[str] = []
+        deletes: list[str] = []
+        dlg.profile_renamed.connect(lambda old, new: renames.append((old, new)))
+        dlg.profile_created.connect(lambda n: creates.append(n))
+        dlg.profile_deleted.connect(lambda n: deletes.append(n))
+
+        result = dlg.exec()
+
+        # Always refresh the dropdown — names may have changed even if the
+        # user clicked Cancel (New / Rename / Delete commit immediately).
+        active = self._current_profile_name
+        for old, new in renames:
+            if active == old:
+                active = new
+                config.set("active_profile", new)
+                self.setWindowTitle(f"EfficientAssetRipper v{__version__} — {new}")
+            self._log.append(f"Renamed profile: {old} → {new}", "info")
+        for n in creates:
+            self._log.append(f"Created profile: {n}", "info")
+        for n in deletes:
+            self._log.append(f"Deleted profile: {n}", "info")
+            if active == n:
+                # Active profile was deleted — fall back to the first remaining
+                remaining = self._profile_manager.list_profiles()
+                active = remaining[0] if remaining else ""
+
+        # If OK was pressed, on-disk path values may have changed for the
+        # active profile (e.g. user edited Mounted Folder). Reload state so
+        # the Unpacker panel and config bridges reflect the new values.
+        needs_reload = (
+            result == 1  # QDialog.Accepted
+            or active != self._current_profile_name
+        )
+        if active and needs_reload:
+            self._load_profile(active)
+
+        self._profile_bar.refresh(select=active)
 
     def _load_profile(self, name: str):
         """Load a profile from disk and push its state to all panels."""
@@ -827,23 +892,6 @@ class MainWindow(QMainWindow):
         self._save_current_profile()
         self._load_profile(name)
         self._profile_bar.set_current(name)
-
-    def _on_profile_created(self, name: str):
-        """Handle a newly created profile — switch to it."""
-        self._save_current_profile()
-        self._load_profile(name)
-
-    def _on_profile_deleted(self, name: str):
-        """Handle profile deletion (ProfileBar already switched to next)."""
-        self._log.append(f"Deleted profile: {name}", "info")
-
-    def _on_profile_renamed(self, old: str, new: str):
-        """Handle profile rename."""
-        if self._current_profile_name == old:
-            self._current_profile_name = new
-            config.set("active_profile", new)
-            self.setWindowTitle(f"EfficientAssetRipper v{__version__} — {new}")
-        self._log.append(f"Renamed profile: {old} → {new}", "info")
 
     # ------------------------------------------------------------------
     # Queue management
