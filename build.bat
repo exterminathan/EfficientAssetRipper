@@ -134,7 +134,7 @@ if %ERRORLEVEL% neq 0 (
     echo      Install .NET 8.0 SDK to include CUE4ParseCLI in the build.
     echo      Marker file written to %DIST_DIR%\CUE4PARSE_CLI_MISSING.txt
     echo.
-    > "%DIST_DIR%\CUE4PARSE_CLI_MISSING.txt" echo CUE4ParseCLI was not bundled with this local build (no .NET SDK on PATH).
+    > "%DIST_DIR%\CUE4PARSE_CLI_MISSING.txt" echo CUE4ParseCLI was not bundled with this local build ^(no .NET SDK on PATH^).
     goto :CREATE_ZIP
 )
 

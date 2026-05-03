@@ -45,7 +45,7 @@ jobs:
 
       - name: Run fast test tiers
         # Same exclusion set as build.bat step [0b/5]
-        run: py -m pytest -v -m "not slow and not requires_blender and not requires_everything and not requires_dotnet_cli" --maxfail=3 --tb=long
+        run: py -m pytest -q -m "not slow and not requires_blender and not requires_everything and not requires_dotnet_cli" --maxfail=1
 
       - name: Run build pipeline
         # build.bat re-runs the test gate (cheap, mirrors local behaviour) and
