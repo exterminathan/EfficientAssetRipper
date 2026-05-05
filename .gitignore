@@ -25,6 +25,10 @@ cache/
 outputs/
 logs/
 
+# Stray build/run logs that land at the repo root
+*.log
+batch_log.txt
+
 # ── Build artifacts (PyInstaller) ─────────────────────────────────────────────
 dist/
 build/

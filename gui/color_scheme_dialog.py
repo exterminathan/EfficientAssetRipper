@@ -127,6 +127,10 @@ class ColorSchemeDialog(QDialog):
 
         editable = scheme_name not in _BUILTIN
 
+        # Pull the swatch border from the active theme so it stays visible
+        # against any background — built-in or user-defined.
+        border_hex = theme.current_scheme().get("border_light", "#666666")
+
         cols = 4
         for idx, key in enumerate(SCHEME_KEYS):
             row, col = divmod(idx, cols)
@@ -139,7 +143,7 @@ class ColorSchemeDialog(QDialog):
             btn.setFixedSize(36, 22)
             hex_color = colors.get(key, "#888888")
             btn.setStyleSheet(
-                f"background-color: {hex_color}; border: 1px solid #666; border-radius: 3px;"
+                f"background-color: {hex_color}; border: 1px solid {border_hex}; border-radius: 3px;"
             )
             btn.setToolTip(hex_color)
             if editable:
@@ -162,8 +166,9 @@ class ColorSchemeDialog(QDialog):
             self._custom_colors[key] = hex_val
             btn = self._swatch_buttons.get(key)
             if btn:
+                border_hex = theme.current_scheme().get("border_light", "#666666")
                 btn.setStyleSheet(
-                    f"background-color: {hex_val}; border: 1px solid #666; border-radius: 3px;"
+                    f"background-color: {hex_val}; border: 1px solid {border_hex}; border-radius: 3px;"
                 )
                 btn.setToolTip(hex_val)
 

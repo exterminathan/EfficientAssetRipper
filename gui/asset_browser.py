@@ -54,7 +54,10 @@ class AssetDetailDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"<b>{asset.name}</b>"))
-        layout.addWidget(QLabel(f"Path: {asset.psk_path}"))
+        path_label = QLabel(f"Path: {asset.psk_path}")
+        path_label.setWordWrap(True)
+        path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(path_label)
 
         # Clickable blend path — always shown right after Path
         if asset.blend_path:
@@ -62,14 +65,17 @@ class AssetDetailDialog(QDialog):
                 blend_label = QLabel(
                     f'Blend: <a href="open">{asset.blend_path}</a>'
                 )
-
+                blend_label.setWordWrap(True)
                 blend_label.setCursor(Qt.CursorShape.PointingHandCursor)
                 blend_label.linkActivated.connect(
                     lambda _: self._open_blend(asset.blend_path)
                 )
                 layout.addWidget(blend_label)
             else:
-                layout.addWidget(QLabel(f"Blend: {asset.blend_path} (file missing)"))
+                missing_label = QLabel(f"Blend: {asset.blend_path} (file missing)")
+                missing_label.setWordWrap(True)
+                missing_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                layout.addWidget(missing_label)
 
         layout.addWidget(QLabel(f"Category: {asset.category} / {asset.subcategory}"))
         layout.addWidget(QLabel(f"Status: {asset.status_text}"))
@@ -386,6 +392,10 @@ class AssetBrowser(QWidget):
 
         self._tree.setUpdatesEnabled(False)
 
+        # Hoist the per-leaf status-colour lookup so a 40k-asset rebuild
+        # doesn't allocate a fresh dict + N QColors per leaf.
+        status_color_map = _status_colors()
+
         for cat_name in sorted(groups):
             cat_item = QTreeWidgetItem(self._tree)
             cat_item.setText(0, cat_name)
@@ -431,7 +441,7 @@ class AssetBrowser(QWidget):
                     )
                     leaf.setCheckState(0, Qt.CheckState.Unchecked)
 
-                    color = _status_colors().get(asset.status)
+                    color = status_color_map.get(asset.status)
                     if color:
                         leaf.setForeground(1, color)
 

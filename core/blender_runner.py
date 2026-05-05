@@ -412,6 +412,7 @@ def _wait_with_cancel(
         try:
             out, err = proc.communicate()
         except Exception:
+            log.exception("Blender stdout/stderr drain failed")
             out, err = "", ""
         _holder.append((out, err))
 
@@ -453,22 +454,6 @@ def _wait_with_cancel(
             t.join(timeout=5)
             _, stderr = _holder[0] if _holder else ("", "")
             return False, None, stderr
-
-
-def _terminate_then_kill(proc: "subprocess.Popen") -> tuple[str, str]:
-    """Politely terminate, then kill after a 5s grace. Returns (stdout, stderr)."""
-    try:
-        proc.terminate()
-    except OSError:
-        pass
-    try:
-        return proc.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        try:
-            return proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            return "", ""
 
 
 def _process_status(status: dict, result: BlenderResult):

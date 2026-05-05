@@ -171,7 +171,6 @@ class UnpackerPanel(QWidget):
         top_layout.setContentsMargins(0, 0, 0, 0)
 
         # ── Mount controls ────────────────────────────────────────────
-        from PySide6.QtWidgets import QGroupBox
         mount_section = QGroupBox("Mount Archives")
         mount_layout = QVBoxLayout()
 

@@ -31,6 +31,18 @@ def _level_colors():
     }
 
 
+def _readable_text_on(bg_hex: str) -> str:
+    """Pick black or white text for *bg_hex* based on perceived luminance.
+
+    Used by the alert banner so the message stays readable whether the
+    active scheme's ``warning`` token is a bright yellow or a dim ochre.
+    """
+    col = QColor(bg_hex)
+    # Rec.709 relative luminance — good enough for picking ink colour.
+    lum = (0.2126 * col.red() + 0.7152 * col.green() + 0.0722 * col.blue()) / 255.0
+    return "#1a1a1a" if lum > 0.5 else "#f0f0f0"
+
+
 _MAX_LOG_ENTRIES = 5000
 
 
@@ -79,11 +91,12 @@ class LogViewer(QWidget):
         self._alert_frame.setVisible(False)
         c = theme.current_scheme()
         warn = c["warning"]
+        text_on_warn = _readable_text_on(warn)
         self._alert_frame.setStyleSheet(
             f"QFrame {{ background: {warn}; border: 1px solid {warn}; "
             f"border-radius: 4px; padding: 6px; }}"
-            f"QLabel {{ color: #1a1a1a; background: transparent; }}"
-            f"QPushButton {{ color: #1a1a1a; background: rgba(0,0,0,0.08); "
+            f"QLabel {{ color: {text_on_warn}; background: transparent; }}"
+            f"QPushButton {{ color: {text_on_warn}; background: rgba(0,0,0,0.08); "
             f"border: 1px solid rgba(0,0,0,0.25); border-radius: 3px; padding: 2px 8px; }}"
             f"QPushButton:hover {{ background: rgba(0,0,0,0.18); }}"
         )
