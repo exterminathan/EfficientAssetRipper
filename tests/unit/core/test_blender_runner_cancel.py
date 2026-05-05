@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import threading
+
 import pytest
 
 from core.blender_runner import _wait_with_cancel
@@ -10,42 +13,42 @@ pytestmark = pytest.mark.unit
 
 
 class _FakeProc:
-    """Minimal Popen stand-in for `_wait_with_cancel`."""
+    """Minimal Popen stand-in for `_wait_with_cancel`.
 
-    def __init__(self, exit_after_calls: int = 9999, returncode: int = 0):
-        self._poll_count = 0
-        self._exit_after = exit_after_calls
-        self.returncode = None
+    ``communicate()`` blocks until the process is signalled via
+    ``terminate()`` or ``kill()`` (or pre-exits when ``auto_exit=True``).
+    This mirrors real Popen behaviour where communicate() drains pipes and
+    only returns after the subprocess exits.
+    """
+
+    def __init__(self, auto_exit: bool = False, returncode: int = 0):
+        self._exit_event = threading.Event()
         self._final_rc = returncode
+        self.returncode: int | None = None
         self.terminated = False
         self.killed = False
         self.communicated = False
-
-    def poll(self):
-        self._poll_count += 1
-        if self._poll_count >= self._exit_after:
-            self.returncode = self._final_rc
-            return self._final_rc
-        return None
-
-    def wait(self, timeout=None):
-        # Behave like a child still running for the duration of `timeout`.
-        import subprocess
-        # Each call advances internal "ticks" toward eventual exit.
-        if self._poll_count >= self._exit_after - 1:
-            self.returncode = self._final_rc
-            return self._final_rc
-        raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+        if auto_exit:
+            self.returncode = returncode
+            self._exit_event.set()
 
     def terminate(self):
         self.terminated = True
+        self.returncode = -15
+        self._exit_event.set()
 
     def kill(self):
         self.killed = True
         self.returncode = -9
+        self._exit_event.set()
 
     def communicate(self, timeout=None):
         self.communicated = True
+        if timeout is not None:
+            if not self._exit_event.wait(timeout=timeout):
+                raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+        else:
+            self._exit_event.wait()
         if self.returncode is None:
             self.returncode = self._final_rc
         return ("stdout text", "stderr text")
@@ -53,7 +56,7 @@ class _FakeProc:
 
 def test_wait_with_cancel_no_callback_uses_simple_path():
     """Without `cancel_check`, behaviour matches the old `proc.communicate`."""
-    proc = _FakeProc(exit_after_calls=1, returncode=0)
+    proc = _FakeProc(auto_exit=True, returncode=0)
     cancelled, stdout, stderr = _wait_with_cancel(proc, timeout=10, cancel_check=None)
     assert cancelled is False
     assert stdout == "stdout text"
@@ -62,7 +65,7 @@ def test_wait_with_cancel_no_callback_uses_simple_path():
 
 def test_wait_with_cancel_returns_cancelled_when_check_returns_true():
     """When `cancel_check()` flips True, the proc is terminated and we return."""
-    proc = _FakeProc(exit_after_calls=99999)  # never naturally exits
+    proc = _FakeProc()  # never naturally exits
     flag = {"v": False}
 
     def check():
@@ -84,7 +87,7 @@ def test_wait_with_cancel_returns_cancelled_when_check_returns_true():
 def test_wait_with_cancel_returns_timeout_when_neither_exits_nor_cancels():
     """If the cancel callback always returns False and the proc never exits,
     we hit the timeout branch and signal it via stdout=None."""
-    proc = _FakeProc(exit_after_calls=99999)
+    proc = _FakeProc()  # never naturally exits
 
     def never_cancel():
         return False

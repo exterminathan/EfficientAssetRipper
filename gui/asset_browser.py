@@ -243,18 +243,11 @@ class AssetBrowser(QWidget):
         self._search.textChanged.connect(self._schedule_rebuild)
         search_row.addWidget(self._search, 1)
 
-        self._adv_toggle = QPushButton("Advanced \u25b6")
-        self._adv_toggle.setFixedWidth(90)
-        self._adv_toggle.setCheckable(True)
-        self._adv_toggle.toggled.connect(self._toggle_advanced)
-        search_row.addWidget(self._adv_toggle)
-
         layout.addLayout(search_row)
 
-        # --- Advanced filters (hidden by default) ---
-        self._adv_widget = QWidget()
-        self._adv_widget.setVisible(False)
-        adv_layout = QHBoxLayout(self._adv_widget)
+        # --- Advanced filters (collapsed by default) ---
+        adv_section = CollapsibleSection("Advanced filters", start_expanded=False)
+        adv_layout = QHBoxLayout()
         adv_layout.setContentsMargins(0, 2, 0, 2)
 
         adv_layout.addWidget(QLabel("Category:"))
@@ -272,7 +265,8 @@ class AssetBrowser(QWidget):
         self._status_filter.setMinimumWidth(130)
         adv_layout.addWidget(self._status_filter, 1)
 
-        layout.addWidget(self._adv_widget)
+        adv_section.set_content_layout(adv_layout)
+        layout.addWidget(adv_section)
 
         # --- Middle area: expand/collapse + add to queue ---
         btn_bar = QHBoxLayout()
@@ -480,9 +474,6 @@ class AssetBrowser(QWidget):
             self._toggle_expand_btn.setText("Collapse All")
         self._expanded = not self._expanded
 
-    def _toggle_advanced(self, checked: bool):
-        self._adv_widget.setVisible(checked)
-        self._adv_toggle.setText("Advanced \u25bc" if checked else "Advanced \u25b6")
 
     # ------------------------------------------------------------------
     # Context menu

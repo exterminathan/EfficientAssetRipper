@@ -188,6 +188,7 @@ class QueuePanel(QWidget):
     def set_resolving(self, enabled: bool):
         """Disable/enable the Process Queue button while resolving assets."""
         self._process_btn.setEnabled(not enabled)
+        self._cancel_btn.setEnabled(enabled)
         self._is_resolving = enabled
         if enabled:
             self._header_label.setText("Resolving Assets")

@@ -56,6 +56,19 @@ internal static class Program
     private static readonly Queue<JObject> _pendingGetProps = new(); // get_props commands queued during export
     private static readonly object _respondLock = new(); // guards stdout writes during concurrent export
 
+    // Version-mismatch hint: when a stream of warnings/errors look like the UE
+    // struct layout doesn't match the data on disk, surface a one-shot hint to
+    // the GUI so the user can pick a different UE version and re-mount.
+    private static int _versionMismatchCount;
+    private static bool _versionMismatchHintEmitted;
+    private static string _currentUeVersion = "";
+    private static readonly string[] _versionMismatchPatterns =
+    {
+        "Read size is bigger than remaining archive length",
+        "Read size is smaller than zero",
+    };
+    private const int VersionMismatchHintThreshold = 3;
+
     private static readonly JsonSerializerOptions _writeOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -482,6 +495,11 @@ internal static class Program
         // Parse UE version
         if (!Enum.TryParse<EGame>(ueVersionStr, true, out var ueVersion))
             ueVersion = EGame.GAME_UE5_4;
+
+        // Reset version-mismatch detector for the new mount.
+        _versionMismatchCount = 0;
+        _versionMismatchHintEmitted = false;
+        _currentUeVersion = ueVersionStr;
 
         // Ensure Oodle decompression DLL is available (required for IoStore .ucas/.utoc)
         InitOodle(gameDir);
@@ -2113,10 +2131,44 @@ internal static class Program
             Console.Out.WriteLine(json);
             Console.Out.Flush();
         }
+        CheckForVersionMismatchHint(json);
     }
 
     private static void RespondError(string message)
     {
         Respond(new { type = "error", message });
+    }
+
+    // Tally version-mismatch-shaped messages. The struct-layout-doesn't-match
+    // signature is unmistakable: reads return sizes that are negative or bigger
+    // than what's left in the archive. Once we hit a small threshold, emit a
+    // single distinct message so the GUI can prompt the user to pick another
+    // UE version. Re-arms on the next init.
+    private static void CheckForVersionMismatchHint(string json)
+    {
+        if (_versionMismatchHintEmitted) return;
+        if (!json.Contains("\"type\":\"warning\"") && !json.Contains("\"type\":\"error\"")) return;
+
+        bool matched = false;
+        foreach (var p in _versionMismatchPatterns)
+        {
+            if (json.Contains(p)) { matched = true; break; }
+        }
+        if (!matched) return;
+
+        _versionMismatchCount++;
+        if (_versionMismatchCount < VersionMismatchHintThreshold) return;
+
+        _versionMismatchHintEmitted = true;
+        var hint = $"Detected {_versionMismatchCount} read errors typical of a UE-version mismatch. " +
+                   $"The current selection ({_currentUeVersion}) likely doesn't match this game's engine version. " +
+                   "Try a different UE Version (e.g. an adjacent UE5_x or UE4_x) and re-mount.";
+        Respond(new
+        {
+            type = "version_warning",
+            message = hint,
+            current_version = _currentUeVersion,
+            error_count = _versionMismatchCount,
+        });
     }
 }

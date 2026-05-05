@@ -32,6 +32,7 @@ class UnpackerProcess(QObject):
     exports_listed = Signal(str, list)        # path, list[dict{name, export_type, outer}]
     wwise_scan_result = Signal(dict)          # full scan result dict
     warning = Signal(str)                     # warning message
+    version_warning = Signal(str, str)        # (message, current_ue_version) — likely UE-version mismatch
     error = Signal(str)                       # error message
     process_ready = Signal()                  # CLI process started OK
     process_ended = Signal()                  # CLI process died / quit
@@ -269,6 +270,12 @@ class UnpackerProcess(QObject):
 
         elif msg_type == "warning":
             self.warning.emit(msg.get("message", ""))
+
+        elif msg_type == "version_warning":
+            self.version_warning.emit(
+                msg.get("message", ""),
+                msg.get("current_version", ""),
+            )
 
         elif msg_type == "error":
             self.error.emit(msg.get("message", ""))

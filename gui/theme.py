@@ -89,7 +89,8 @@ def _build_palette(c: dict[str, str]) -> QPalette:
     pal.setColor(QPalette.ColorRole.Button,          QColor(c["bg_mid"]))
     pal.setColor(QPalette.ColorRole.ButtonText,      QColor(c["text_primary"]))
     pal.setColor(QPalette.ColorRole.BrightText,      QColor(c["text_bright"]))
-    pal.setColor(QPalette.ColorRole.Link,            QColor(c["accent"]))
+    pal.setColor(QPalette.ColorRole.Link,            QColor(c["link"]))
+    pal.setColor(QPalette.ColorRole.LinkVisited,     QColor(c["link_hover"]))
     pal.setColor(QPalette.ColorRole.Highlight,       QColor(c["highlight"]))
     pal.setColor(QPalette.ColorRole.HighlightedText, QColor(c["highlight_text"]))
     pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,       QColor(c["text_disabled"]))
@@ -590,6 +591,17 @@ QSlider::handle:horizontal {{
 
 QSlider::handle:horizontal:hover {{
     background: {c["accent_hover"]};
+}}
+
+/* ===== Links ======================================================= */
+
+QLabel a {{
+    color: {c["link"]};
+    text-decoration: underline;
+}}
+
+QLabel a:hover {{
+    color: {c["link_hover"]};
 }}
 
 /* ===== Collapsible section toggle ================================== */

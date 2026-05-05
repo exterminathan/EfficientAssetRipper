@@ -105,8 +105,24 @@ echo.
 
 :: ── Step 2: Copy output to dist/ ─────────────────────────────────────────────
 echo [2/5] Copying build output to dist\...
+
+:: Preserve runtime directories across rebuilds so profiles/cache/logs survive.
+set "RUNTIME_BACKUP=%BUILD_TEMP%\runtime_backup"
+if exist "%RUNTIME_BACKUP%" rmdir /s /q "%RUNTIME_BACKUP%"
+for %%D in (profiles cache outputs logs) do (
+    if exist "%DIST_DIR%\%%D" (
+        xcopy /Y /E /I /Q "%DIST_DIR%\%%D" "%RUNTIME_BACKUP%\%%D" >nul
+    )
+)
+
 if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
 xcopy /Y /E /I /Q "%BUILD_TEMP%\dist\EfficientAssetRipper" "%DIST_DIR%" >nul
+
+:: Restore preserved runtime directories.
+if exist "%RUNTIME_BACKUP%" (
+    xcopy /Y /E /I /Q "%RUNTIME_BACKUP%" "%DIST_DIR%" >nul
+    rmdir /s /q "%RUNTIME_BACKUP%"
+)
 
 :: Copy data files alongside the exe (not inside _internal)
 xcopy /Y /E /I /Q "%PROJECT_DIR%data" "%DIST_DIR%\data" >nul

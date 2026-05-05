@@ -120,6 +120,7 @@ class _PickerResolveWorker(QThread):
     """Background thread for resolving PSK entries from the picker."""
 
     progress = Signal(int, int, str)
+    entry_resolved = Signal(object)  # emits each AssetEntry immediately after resolution
     finished = Signal(int, int)     # (resolved_count, still_incomplete)
     error = Signal(str)
 
@@ -146,6 +147,7 @@ class _PickerResolveWorker(QThread):
                 self._scanner.resolve_entry(entry)
                 if entry.status == "ready":
                     resolved += 1
+                self.entry_resolved.emit(entry)
             self.progress.emit(total, total, "Resolve complete")
             still_incomplete = total - resolved
             self.finished.emit(resolved, still_incomplete)
@@ -396,6 +398,7 @@ class MainWindow(QMainWindow):
         self._psk_picker.add_to_queue_requested.connect(self._add_picker_to_queue)
         self._unpacker_panel.psk_extracted.connect(self._on_psks_extracted)
         self._unpacker_panel.log_message.connect(self._log.append)
+        self._unpacker_panel.version_mismatch.connect(self._log.show_alert)
         self._unpacker_panel.props_viewed.connect(self._show_in_text_viewer)
         self._unpacker_panel.audio_preview.connect(self._on_audio_preview)
         self._unpacker_panel.tga_preview.connect(self._on_tga_preview)
@@ -938,25 +941,31 @@ class MainWindow(QMainWindow):
             entries.append(e)
 
         self._picker_entries = entries
+        self._picker_resolved_entries: list[AssetEntry] = []
         self._picker_worker = _PickerResolveWorker(scanner, entries, self)
         self._picker_worker.progress.connect(self._on_scan_progress)
+        self._picker_worker.entry_resolved.connect(self._on_picker_entry_resolved)
         self._picker_worker.finished.connect(self._on_picker_resolved)
         self._picker_worker.error.connect(self._on_scan_error)
         self._track_worker(self._picker_worker)
         self._queue.set_resolving(True)
+        self._right_tabs.setCurrentIndex(0)
         self._picker_worker.start()
+
+    @Slot(object)
+    def _on_picker_entry_resolved(self, entry: AssetEntry):
+        """Add each resolved entry to the queue immediately as it finishes."""
+        self._picker_resolved_entries.append(entry)
+        self._queue.add_to_queue([entry])
 
     @Slot(int, int)
     def _on_picker_resolved(self, resolved: int, still_incomplete: int):
         self._queue.set_resolving(False)
-        entries = self._picker_entries
-        self._queue.add_to_queue(entries)
-        # Merge picker entries into the browser so they appear in the asset list
+        entries = self._picker_resolved_entries
         self._merge_entries_into_browser(entries)
         msg = f"Added {len(entries)} picked assets to queue ({resolved} ready)"
         self._log.append(msg, "info")
         self._statusbar.showMessage(msg)
-        self._right_tabs.setCurrentIndex(0)
 
     # ------------------------------------------------------------------
     # Processing
@@ -1032,6 +1041,11 @@ class MainWindow(QMainWindow):
         if self._job_manager and self._job_manager.isRunning():
             self._job_manager.cancel()
             self._log.append("Cancelling batch...", "warning")
+        picker_worker = getattr(self, "_picker_worker", None)
+        if picker_worker and picker_worker.isRunning():
+            picker_worker.cancel()
+            self._log.append("Cancelling asset resolve...", "warning")
+            self._statusbar.showMessage("Cancelling resolve...")
 
     @Slot(int, int, int)
     def _on_processing_done(self, total: int, succeeded: int, failed: int):

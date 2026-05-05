@@ -159,10 +159,21 @@ def main():
     window.setGeometry(_win_x, _win_y, _win_w, _win_h)
 
     if SHOW_SPLASH:
-        def _show_main():
-            window.show()
+        # Show the main window first so Windows treats it as the active app
+        # window from frame 1 — the splash will cover it visually but won't
+        # steal focus (WA_ShowWithoutActivating). When the splash closes,
+        # focus naturally stays on the window instead of getting handed off
+        # to whatever app was previously active.
+        window.show()
+
+        def _on_splash_done():
+            # Belt-and-braces: ensure the window is on top + has focus once
+            # the splash has finished animating away.
+            window.raise_()
+            window.activateWindow()
+
         splash = SplashScreen(
-            finish_callback=_show_main,
+            finish_callback=_on_splash_done,
             target_rect=QRect(_win_x, _win_y, _win_w, _win_h),
         )
         splash.start()

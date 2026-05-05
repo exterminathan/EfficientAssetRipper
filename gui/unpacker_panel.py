@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.widgets import ZoomableTree
+from gui.widgets import CollapsibleSection, ZoomableTree
 
 import config
 from core.unpacker import UnpackerProcess
@@ -74,6 +74,7 @@ class UnpackerPanel(QWidget):
     props_viewed = Signal(str, str)     # (title, json_text) for Text Viewer
     audio_preview = Signal(str)         # local file path for Audio Preview tab
     tga_preview = Signal(str)           # local file path for TGA/image Preview tab
+    version_mismatch = Signal(str)      # banner text for the log viewer
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -260,17 +261,11 @@ class UnpackerPanel(QWidget):
         self._search.textChanged.connect(self._filter_tree)
         search_row.addWidget(self._search, 1)
 
-        self._adv_toggle = QPushButton("Advanced \u25b6")
-        self._adv_toggle.setFixedWidth(90)
-        self._adv_toggle.setCheckable(True)
-        self._adv_toggle.toggled.connect(self._toggle_advanced)
-        search_row.addWidget(self._adv_toggle)
         bottom_layout.addLayout(search_row)
 
         # ── Advanced filters (hidden by default) ──────────────────────
-        self._adv_widget = QWidget()
-        self._adv_widget.setVisible(False)
-        adv_layout = QHBoxLayout(self._adv_widget)
+        adv_section = CollapsibleSection("Advanced filters", start_expanded=False)
+        adv_layout = QHBoxLayout()
         adv_layout.setContentsMargins(0, 2, 0, 2)
 
         adv_layout.addWidget(QLabel("Extension:"))
@@ -279,7 +274,8 @@ class UnpackerPanel(QWidget):
         self._ext_filter.setToolTip("Show only files with these extensions (space-separated)")
         self._ext_filter.textChanged.connect(self._filter_tree)
         adv_layout.addWidget(self._ext_filter, 1)
-        bottom_layout.addWidget(self._adv_widget)
+        adv_section.set_content_layout(adv_layout)
+        bottom_layout.addWidget(adv_section)
 
         # ── Mount info (middle area) ──────────────────────────────────
         self._mount_info = QLabel("")
@@ -387,16 +383,13 @@ class UnpackerPanel(QWidget):
         self._unpacker.exports_listed.connect(self._on_exports_listed)
         self._unpacker.wwise_scan_result.connect(self._on_wwise_scan_result)
         self._unpacker.warning.connect(self._on_warning)
+        self._unpacker.version_warning.connect(self._on_version_warning)
         self._unpacker.error.connect(self._on_error)
         self._unpacker.process_ended.connect(self._on_process_ended)
 
     # ------------------------------------------------------------------
     # Tree filtering (in-place hide/show for lazy-loaded VFS)
     # ------------------------------------------------------------------
-
-    def _toggle_advanced(self, checked: bool):
-        self._adv_widget.setVisible(checked)
-        self._adv_toggle.setText("Advanced \u25bc" if checked else "Advanced \u25b6")
 
     def _filter_tree(self):
         """Filter the VFS tree in-place, hiding non-matching items."""
@@ -455,6 +448,8 @@ class UnpackerPanel(QWidget):
         self._mount_btn.setEnabled(False)
         self._status_label.setText("Starting CUE4ParseCLI...")
         self._progress.setMaximum(0)  # indeterminate
+        # Clear any prior version-mismatch banner — re-mount re-arms detection.
+        self.version_mismatch.emit("")
 
         if not self._unpacker.is_running:
             if not self._unpacker.start(cli_path):
@@ -1243,6 +1238,17 @@ class UnpackerPanel(QWidget):
     @Slot(str)
     def _on_warning(self, message: str):
         self.log_message.emit(f"CUE4Parse warning: {message}", "warning")
+
+    @Slot(str, str)
+    def _on_version_warning(self, message: str, current_version: str):
+        # Emit as a high-priority log line and surface a dismissible banner
+        # near the log viewer so the user notices without needing to scroll.
+        self.log_message.emit(f"Possible UE version mismatch: {message}", "error")
+        banner = (
+            f"Possible UE version mismatch — current: {current_version or '?'}. "
+            f"{message}"
+        )
+        self.version_mismatch.emit(banner)
 
     @Slot(str)
     def _on_error(self, message: str):

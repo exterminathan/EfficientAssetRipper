@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 import config
 from core.classifier import classify
 from core.everything import EverythingError, get_sdk
-from gui.widgets import ZoomableTree
+from gui.widgets import CollapsibleSection, ZoomableTree
 import gui.theme as theme
 
 
@@ -104,18 +104,11 @@ class PskPickerPanel(QWidget):
         self._filter.textChanged.connect(self._schedule_rebuild)
         search_row.addWidget(self._filter, 1)
 
-        self._adv_toggle = QPushButton("Advanced \u25b6")
-        self._adv_toggle.setFixedWidth(90)
-        self._adv_toggle.setCheckable(True)
-        self._adv_toggle.toggled.connect(self._toggle_advanced)
-        search_row.addWidget(self._adv_toggle)
-
         layout.addLayout(search_row)
 
-        # --- Advanced filters (hidden by default) ---
-        self._adv_widget = QWidget()
-        self._adv_widget.setVisible(False)
-        adv_layout = QVBoxLayout(self._adv_widget)
+        # --- Advanced filters (collapsed by default) ---
+        adv_section = CollapsibleSection("Advanced filters", start_expanded=False)
+        adv_layout = QVBoxLayout()
         adv_layout.setContentsMargins(0, 2, 0, 2)
 
         adv_row1 = QHBoxLayout()
@@ -153,7 +146,8 @@ class PskPickerPanel(QWidget):
         adv_row2.addStretch()
         adv_layout.addLayout(adv_row2)
 
-        layout.addWidget(self._adv_widget)
+        adv_section.set_content_layout(adv_layout)
+        layout.addWidget(adv_section)
 
         # --- Middle area: re-load + expand/collapse + add to queue ---
         btn_bar = QHBoxLayout()
@@ -426,9 +420,6 @@ class PskPickerPanel(QWidget):
             self._toggle_expand_btn.setText("Collapse All")
         self._expanded = not self._expanded
 
-    def _toggle_advanced(self, checked: bool):
-        self._adv_widget.setVisible(checked)
-        self._adv_toggle.setText("Advanced \u25bc" if checked else "Advanced \u25b6")
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int):
         """Track check-state changes in _checked_paths."""

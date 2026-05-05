@@ -12,6 +12,7 @@ import os
 import secrets
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -155,10 +156,15 @@ def _validate_blender_exe(blender_exe: str) -> tuple[bool, str]:
     except OSError as e:
         return False, f"Could not stat Blender executable: {e}"
 
-    fingerprint = _hash_prefix(p)
+    # Fast path: check mtime first before touching the file content.
+    # Computing _hash_prefix on every call would read 4 KB of blender.exe
+    # per asset (and trigger AV scanners on Windows) even when nothing changed.
     cached = _BLENDER_VALIDATION_CACHE.get(abs_path)
-    if cached is not None and cached[0] == mtime and cached[1] == fingerprint:
+    if cached is not None and cached[0] == mtime:
         return True, cached[2]
+
+    # Cache miss or mtime drifted — read the fingerprint and re-verify.
+    fingerprint = _hash_prefix(p)
 
     try:
         result = subprocess.run(
@@ -394,31 +400,59 @@ def _wait_with_cancel(
             return False, None, stderr
         return False, stdout, stderr
 
-    poll_interval = 0.25
+    # Drain stdout/stderr in a background thread so the OS pipe buffer never
+    # fills up.  If the pipe isn't read while Blender writes, the buffer fills
+    # (~4–64 KB on Windows), Blender blocks mid-write, the process never exits,
+    # and our poll loop runs until the full timeout.  proc.communicate() uses
+    # internal reader threads and handles this correctly; we just need to drive
+    # it from a daemon thread so we can still check cancel_check() in parallel.
+    _holder: list[tuple[str, str]] = []
+
+    def _reader():
+        try:
+            out, err = proc.communicate()
+        except Exception:
+            out, err = "", ""
+        _holder.append((out, err))
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+
     elapsed = 0.0
+    poll_interval = 0.25
     while True:
-        if proc.poll() is not None:
-            stdout, stderr = proc.communicate()
+        t.join(timeout=poll_interval)
+        if not t.is_alive():
+            stdout, stderr = _holder[0] if _holder else ("", "")
             return False, stdout, stderr
+
         if cancel_check():
-            stdout, stderr = _terminate_then_kill(proc)
+            # Signal the process then let the reader thread drain whatever
+            # remains.  We avoid calling communicate() here to prevent a
+            # double-communicate race with the reader thread.
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            t.join(timeout=5)
+            if t.is_alive():
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                t.join(timeout=5)
+            stdout, stderr = _holder[0] if _holder else ("", "")
             return True, stdout, stderr
 
-        # Time-based timeout independent of clock skew.
+        elapsed += poll_interval
         if elapsed >= timeout:
-            proc.kill()
             try:
-                _, stderr = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                stderr = ""
+                proc.kill()
+            except OSError:
+                pass
+            t.join(timeout=5)
+            _, stderr = _holder[0] if _holder else ("", "")
             return False, None, stderr
-
-        try:
-            proc.wait(timeout=poll_interval)
-        except subprocess.TimeoutExpired:
-            elapsed += poll_interval
-            continue
-        # If wait returned, the next loop iteration handles the exit.
 
 
 def _terminate_then_kill(proc: "subprocess.Popen") -> tuple[str, str]:

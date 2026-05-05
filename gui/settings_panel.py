@@ -7,24 +7,16 @@ covers global tooling paths shared across every profile.
 
 from __future__ import annotations
 
-import copy
-import json
 import os
-from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QApplication,
-    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -37,14 +29,8 @@ from PySide6.QtWidgets import (
 )
 
 import config
-from gui.color_schemes import (
-    SCHEME_KEYS,
-    SCHEMES,
-    get_scheme,
-    list_scheme_names,
-    register_custom_scheme,
-)
-from gui.widgets import PathPicker
+from gui.color_scheme_dialog import ColorSchemeDialog
+from gui.widgets import CollapsibleSection, PathPicker
 import gui.theme as theme
 
 
@@ -70,9 +56,9 @@ class SettingsDialog(QDialog):
         outer.addWidget(scroll, stretch=1)
 
         # --- Tooling paths (global; per-profile paths live in Manage Profiles) ---
-        paths_group = QGroupBox("Tooling Paths")
-        paths_form = QFormLayout(paths_group)
-        paths_group.setToolTip(
+        paths_section = CollapsibleSection("Tooling Paths", start_expanded=False)
+        paths_form = QFormLayout()
+        paths_section.setToolTip(
             "These paths apply to every profile. Per-profile paths "
             "(Game folder / Mounted folder / Output folder) are edited under "
             "Manage Profiles."
@@ -110,11 +96,12 @@ class SettingsDialog(QDialog):
         self.cue4parse_cli.setText(config.get("cue4parse_cli"))
         paths_form.addRow("CUE4Parse CLI:", self.cue4parse_cli)
 
-        layout.addWidget(paths_group)
+        paths_section.set_content_layout(paths_form)
+        layout.addWidget(paths_section)
 
         # --- Processing group ---
-        proc_group = QGroupBox("Processing")
-        proc_form = QFormLayout(proc_group)
+        proc_section = CollapsibleSection("Processing", start_expanded=False)
+        proc_form = QFormLayout()
 
         self.addon_name = QLineEdit(config.get("psk_addon_name"))
         proc_form.addRow("PSK Import Addon:", self.addon_name)
@@ -125,11 +112,12 @@ class SettingsDialog(QDialog):
         self.timeout.setValue(config.get_int("timeout_seconds") or 120)
         proc_form.addRow("Timeout per Asset:", self.timeout)
 
-        layout.addWidget(proc_group)
+        proc_section.set_content_layout(proc_form)
+        layout.addWidget(proc_section)
 
         # --- Export Formats group ---
-        fmt_group = QGroupBox("Export Formats")
-        fmt_form = QFormLayout(fmt_group)
+        fmt_section = CollapsibleSection("Export Formats", start_expanded=False)
+        fmt_form = QFormLayout()
 
         self.texture_format = QComboBox()
         self.texture_format.addItems(["png", "tga"])
@@ -144,60 +132,33 @@ class SettingsDialog(QDialog):
         mesh_label = QLabel("PSK / PSKX (automatic)")
         fmt_form.addRow("Meshes:", mesh_label)
 
-        layout.addWidget(fmt_group)
+        fmt_section.set_content_layout(fmt_form)
+        layout.addWidget(fmt_section)
 
-        # --- Presets shortcut ---
+        # --- Presets shortcut (one-shot action, not a section) ---
         presets_btn = QPushButton("Open Texture Presets JSON in Editor")
         presets_btn.clicked.connect(self._open_presets)
         layout.addWidget(presets_btn)
 
-        # --- Appearance / Color Scheme group ---
-        appearance_group = QGroupBox("Appearance — Color Scheme")
-        appearance_layout = QVBoxLayout(appearance_group)
-
-        scheme_row = QHBoxLayout()
-        scheme_row.addWidget(QLabel("Scheme:"))
-        self._scheme_combo = QComboBox()
-        self._scheme_combo.addItems(list_scheme_names())
-        current = config.get("color_scheme") or theme.current_scheme_name()
-        if current in [self._scheme_combo.itemText(i) for i in range(self._scheme_combo.count())]:
-            self._scheme_combo.setCurrentText(current)
-        self._scheme_combo.currentTextChanged.connect(self._on_scheme_changed)
-        scheme_row.addWidget(self._scheme_combo)
-
-        self._new_scheme_btn = QPushButton("New Custom…")
-        self._new_scheme_btn.clicked.connect(self._new_custom_scheme)
-        scheme_row.addWidget(self._new_scheme_btn)
-
-        self._delete_scheme_btn = QPushButton("Delete Custom")
-        self._delete_scheme_btn.clicked.connect(self._delete_custom_scheme)
-        scheme_row.addWidget(self._delete_scheme_btn)
-
-        scheme_row.addStretch()
-        appearance_layout.addLayout(scheme_row)
-
-        # Scrollable grid of color swatches for customisation
-        self._color_scroll = QScrollArea()
-        self._color_scroll.setWidgetResizable(True)
-        self._color_scroll.setMaximumHeight(280)
-        self._color_grid_widget = QWidget()
-        self._color_grid = QGridLayout(self._color_grid_widget)
-        self._color_grid.setContentsMargins(4, 4, 4, 4)
-        self._color_grid.setSpacing(4)
-        self._color_scroll.setWidget(self._color_grid_widget)
-        appearance_layout.addWidget(self._color_scroll)
-
-        self._swatch_buttons: dict[str, QPushButton] = {}  # token → button
-        self._custom_colors: dict[str, str] = {}  # current overrides
-
-        self._populate_color_grid()
-        self._update_delete_button()
-
-        layout.addWidget(appearance_group)
+        # --- Appearance: thin shortcut to the dedicated colour-scheme dialog ---
+        appearance_section = CollapsibleSection("Appearance", start_expanded=False)
+        appearance_layout = QVBoxLayout()
+        active_row = QHBoxLayout()
+        self._active_scheme_label = QLabel(
+            f"Active scheme: {config.get('color_scheme') or theme.current_scheme_name()}"
+        )
+        active_row.addWidget(self._active_scheme_label)
+        active_row.addStretch()
+        customize_btn = QPushButton("Customize Colors…")
+        customize_btn.clicked.connect(self._open_color_scheme_dialog)
+        active_row.addWidget(customize_btn)
+        appearance_layout.addLayout(active_row)
+        appearance_section.set_content_layout(appearance_layout)
+        layout.addWidget(appearance_section)
 
         # --- Test group ---
-        test_group = QGroupBox("Verify Setup")
-        test_layout = QVBoxLayout(test_group)
+        test_section = CollapsibleSection("Verify Setup", start_expanded=False)
+        test_layout = QVBoxLayout()
 
         test_btn = QPushButton("Test All Paths && SDKs")
         test_btn.clicked.connect(self._run_tests)
@@ -205,11 +166,12 @@ class SettingsDialog(QDialog):
 
         self._test_output = QTextEdit()
         self._test_output.setReadOnly(True)
-        self._test_output.setMaximumHeight(200)
-
         test_layout.addWidget(self._test_output)
 
-        layout.addWidget(test_group)
+        test_section.set_content_layout(test_layout)
+        layout.addWidget(test_section)
+
+        layout.addStretch()
 
         # --- Buttons (outside scroll area, always visible) ---
         buttons = QDialogButtonBox(
@@ -293,165 +255,23 @@ class SettingsDialog(QDialog):
         config.set("export_texture_format", self.texture_format.currentText())
         config.set("export_audio_format", self.audio_format.currentText())
 
-        # Save colour scheme choice
-        scheme_name = self._scheme_combo.currentText()
-        config.set("color_scheme", scheme_name)
-
-        # Persist any custom overrides for the currently selected scheme
-        if self._custom_colors:
-            self._persist_custom_scheme(scheme_name, self._custom_colors)
-
-        # Apply scheme live
-        app = QApplication.instance()
-        if app:
-            theme.apply(app, scheme_name)
-
         self.settings_changed.emit()
         self.accept()
 
     # ------------------------------------------------------------------
-    # Colour-scheme helpers
+    # Appearance shortcut
     # ------------------------------------------------------------------
 
-    # Built-in schemes that cannot be deleted or have colours reassigned
-    _BUILTIN = {"Dusk", "Bloom", "Slate", "Midnight"}
+    def _open_color_scheme_dialog(self):
+        dlg = ColorSchemeDialog(self)
+        dlg.scheme_changed.connect(self._on_scheme_chosen)
+        dlg.exec()
 
-    def _on_scheme_changed(self, name: str):
-        """When the user picks a different scheme in the dropdown."""
-        self._custom_colors = dict(get_scheme(name))
-        self._populate_color_grid()
-        self._update_delete_button()
-
-    def _populate_color_grid(self):
-        """Fill the colour swatch grid from the currently selected scheme."""
-        # Clear existing widgets
-        while self._color_grid.count():
-            item = self._color_grid.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        self._swatch_buttons.clear()
-
-        scheme_name = self._scheme_combo.currentText()
-        colors = dict(get_scheme(scheme_name))
-        if self._custom_colors:
-            colors.update(self._custom_colors)
-        else:
-            self._custom_colors = dict(colors)
-
-        editable = scheme_name not in self._BUILTIN
-
-        cols = 4
-        for idx, key in enumerate(SCHEME_KEYS):
-            row, col = divmod(idx, cols)
-            container = QHBoxLayout()
-            lbl = QLabel(key.replace("_", " ").title())
-            lbl.setFixedWidth(120)
-            container.addWidget(lbl)
-
-            btn = QPushButton()
-            btn.setFixedSize(36, 22)
-            hex_color = colors.get(key, "#888888")
-            btn.setStyleSheet(
-                f"background-color: {hex_color}; border: 1px solid #666; border-radius: 3px;"
-            )
-            btn.setToolTip(hex_color)
-            if editable:
-                btn.clicked.connect(lambda checked=False, k=key: self._pick_color(k))
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            else:
-                btn.setEnabled(False)
-            self._swatch_buttons[key] = btn
-            container.addWidget(btn)
-
-            wrapper = QWidget()
-            wrapper.setLayout(container)
-            self._color_grid.addWidget(wrapper, row, col)
-
-    def _pick_color(self, key: str):
-        """Open a QColorDialog for a specific token."""
-        current = QColor(self._custom_colors.get(key, "#888888"))
-        color = QColorDialog.getColor(current, self, f"Pick colour for {key}")
-        if color.isValid():
-            hex_val = color.name()
-            self._custom_colors[key] = hex_val
-            btn = self._swatch_buttons.get(key)
-            if btn:
-                btn.setStyleSheet(
-                    f"background-color: {hex_val}; border: 1px solid #666; border-radius: 3px;"
-                )
-                btn.setToolTip(hex_val)
-
-    def _new_custom_scheme(self):
-        """Create a new custom scheme by copying the currently selected one."""
-        name, ok = QInputDialog.getText(
-            self, "New Custom Scheme", "Scheme name:",
-        )
-        if not ok or not name:
-            return
-        name = name.strip()
-        if name in SCHEMES:
-            QMessageBox.warning(self, "Duplicate", f"A scheme named '{name}' already exists.")
-            return
-
-        # Copy the currently viewed colours
-        base = dict(get_scheme(self._scheme_combo.currentText()))
-        register_custom_scheme(name, base)
-        self._save_custom_schemes_to_config()
-
-        # Refresh combo
-        self._scheme_combo.blockSignals(True)
-        self._scheme_combo.clear()
-        self._scheme_combo.addItems(list_scheme_names())
-        self._scheme_combo.setCurrentText(name)
-        self._scheme_combo.blockSignals(False)
-
-        self._custom_colors = dict(base)
-        self._populate_color_grid()
-        self._update_delete_button()
-
-    def _delete_custom_scheme(self):
-        """Delete the currently selected custom scheme."""
-        name = self._scheme_combo.currentText()
-        if name in self._BUILTIN:
-            return
-        reply = QMessageBox.question(
-            self, "Delete Scheme",
-            f"Delete custom scheme '{name}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        SCHEMES.pop(name, None)
-        self._save_custom_schemes_to_config()
-
-        self._scheme_combo.blockSignals(True)
-        self._scheme_combo.clear()
-        self._scheme_combo.addItems(list_scheme_names())
-        self._scheme_combo.setCurrentText("Dusk")
-        self._scheme_combo.blockSignals(False)
-
-        self._on_scheme_changed("Dusk")
-
-    def _update_delete_button(self):
-        name = self._scheme_combo.currentText()
-        self._delete_scheme_btn.setEnabled(name not in self._BUILTIN)
-
-    def _persist_custom_scheme(self, name: str, colors: dict[str, str]):
-        """Register and save a custom scheme's colours."""
-        if name in self._BUILTIN:
-            return
-        register_custom_scheme(name, colors)
-        self._save_custom_schemes_to_config()
-
-    def _save_custom_schemes_to_config(self):
-        """Persist all non-built-in schemes to config."""
-        custom = {}
-        for sname, scolors in SCHEMES.items():
-            if sname not in self._BUILTIN:
-                custom[sname] = scolors
-        config.set("custom_schemes", json.dumps(custom))
+    def _on_scheme_chosen(self, name: str):
+        self._active_scheme_label.setText(f"Active scheme: {name}")
+        # Theme is already applied live by ColorSchemeDialog; emit so any
+        # outer listeners refresh.
+        self.settings_changed.emit()
 
     def _open_presets(self):
         path = self.presets_path.text().strip()

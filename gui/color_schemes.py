@@ -47,6 +47,10 @@ _register("Dusk", {
     "highlight":        "#7b68ee",
     "highlight_text":   "#ffffff",
 
+    # Links (kept distinct from accent so they read as clickable)
+    "link":             "#82c8ff",
+    "link_hover":       "#a8d9ff",
+
     # Semantic
     "success":          "#5ecd73",
     "success_hover":    "#72e088",
@@ -98,6 +102,9 @@ _register("Bloom", {
     "highlight":        "#c084d8",
     "highlight_text":   "#ffffff",
 
+    "link":             "#7ad4ff",
+    "link_hover":       "#a8e3ff",
+
     "success":          "#7cc89a",
     "success_hover":    "#92dab0",
     "warning":          "#e0b85a",
@@ -144,6 +151,9 @@ _register("Slate", {
     "highlight":        "#4ea8df",
     "highlight_text":   "#ffffff",
 
+    "link":             "#69d2e7",
+    "link_hover":       "#9ae3ee",
+
     "success":          "#5ec488",
     "success_hover":    "#72d89c",
     "warning":          "#dab050",
@@ -189,6 +199,9 @@ _register("Midnight", {
     "accent_muted":     "#3c5ea8",
     "highlight":        "#5b8af0",
     "highlight_text":   "#ffffff",
+
+    "link":             "#7fc8ff",
+    "link_hover":       "#a8d9ff",
 
     "success":          "#48c878",
     "success_hover":    "#5ee090",

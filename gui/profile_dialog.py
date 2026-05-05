@@ -18,16 +18,15 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -36,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.profile_manager import ProfileManager
-from gui.widgets import PathPicker
+from gui.widgets import CollapsibleSection, PathPicker
 
 log = logging.getLogger(__name__)
 
@@ -124,10 +123,16 @@ class ProfileDialog(QDialog):
 
         splitter.addWidget(left)
 
-        # ── Right pane: editor for selected profile ───────────────────
+        # ── Right pane: editor for selected profile (in a scroll area
+        # so collapsed-by-default sections expand without clipping the
+        # dialog) ─────────────────────────────────────────────────────
         self._editor = _ProfileEditor(parent=self)
         self._editor.field_changed.connect(self._on_field_changed)
-        splitter.addWidget(self._editor)
+        editor_scroll = QScrollArea()
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        editor_scroll.setWidget(self._editor)
+        splitter.addWidget(editor_scroll)
 
         splitter.setSizes([240, 480])
         outer.addWidget(splitter, stretch=1)
@@ -364,8 +369,8 @@ class _ProfileEditor(QWidget):
         outer.setContentsMargins(8, 0, 0, 0)
 
         # ── Paths ─────────────────────────────────────────────────────
-        paths_group = QGroupBox("Paths")
-        paths_form = QFormLayout(paths_group)
+        paths_section = CollapsibleSection("Paths", start_expanded=False)
+        paths_form = QFormLayout()
 
         self._game_dir = PathPicker(mode="folder", title="Select Game Folder")
         self._game_dir.setPlaceholderText("Path to game .pak/.utoc folder (or loose-content root)")
@@ -382,11 +387,12 @@ class _ProfileEditor(QWidget):
         self._output_dir.changed.connect(self._on_changed)
         paths_form.addRow("Output folder:", self._output_dir)
 
-        outer.addWidget(paths_group)
+        paths_section.set_content_layout(paths_form)
+        outer.addWidget(paths_section)
 
         # ── Mount config ──────────────────────────────────────────────
-        mount_group = QGroupBox("Mount")
-        mount_form = QFormLayout(mount_group)
+        mount_section = CollapsibleSection("Mount", start_expanded=False)
+        mount_form = QFormLayout()
 
         self._ue_combo = QComboBox()
         self._ue_combo.setEditable(True)
@@ -411,11 +417,12 @@ class _ProfileEditor(QWidget):
         self._auto_save_chk.toggled.connect(self._on_changed)
         mount_form.addRow("", self._auto_save_chk)
 
-        outer.addWidget(mount_group)
+        mount_section.set_content_layout(mount_form)
+        outer.addWidget(mount_section)
 
         # ── AES keys ──────────────────────────────────────────────────
-        keys_group = QGroupBox("AES Keys")
-        keys_layout = QVBoxLayout(keys_group)
+        keys_section = CollapsibleSection("AES Keys", start_expanded=False)
+        keys_layout = QVBoxLayout()
 
         self._keys_table = QTableWidget()
         self._keys_table.setColumnCount(3)
@@ -425,7 +432,6 @@ class _ProfileEditor(QWidget):
         self._keys_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._keys_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._keys_table.verticalHeader().setVisible(False)
-        self._keys_table.setMaximumHeight(160)
         self._keys_table.itemChanged.connect(self._on_changed)
         keys_layout.addWidget(self._keys_table)
 
@@ -439,7 +445,8 @@ class _ProfileEditor(QWidget):
         keys_btns.addStretch()
         keys_layout.addLayout(keys_btns)
 
-        outer.addWidget(keys_group)
+        keys_section.set_content_layout(keys_layout)
+        outer.addWidget(keys_section)
         outer.addStretch()
 
         self._building = False

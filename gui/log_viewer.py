@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -70,6 +72,33 @@ class LogViewer(QWidget):
 
         layout.addLayout(toolbar)
 
+        # Inline alert banner (hidden by default) — used for version-mismatch
+        # hints and similar high-signal notifications surfaced near the log.
+        self._alert_frame = QFrame()
+        self._alert_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self._alert_frame.setVisible(False)
+        c = theme.current_scheme()
+        warn = c["warning"]
+        self._alert_frame.setStyleSheet(
+            f"QFrame {{ background: {warn}; border: 1px solid {warn}; "
+            f"border-radius: 4px; padding: 6px; }}"
+            f"QLabel {{ color: #1a1a1a; background: transparent; }}"
+            f"QPushButton {{ color: #1a1a1a; background: rgba(0,0,0,0.08); "
+            f"border: 1px solid rgba(0,0,0,0.25); border-radius: 3px; padding: 2px 8px; }}"
+            f"QPushButton:hover {{ background: rgba(0,0,0,0.18); }}"
+        )
+        alert_layout = QHBoxLayout(self._alert_frame)
+        alert_layout.setContentsMargins(8, 4, 8, 4)
+        self._alert_label = QLabel("")
+        self._alert_label.setWordWrap(True)
+        self._alert_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        alert_layout.addWidget(self._alert_label, 1)
+        self._alert_dismiss = QPushButton("Dismiss")
+        self._alert_dismiss.setFixedHeight(22)
+        self._alert_dismiss.clicked.connect(self.hide_alert)
+        alert_layout.addWidget(self._alert_dismiss, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._alert_frame)
+
         # Log text area
         self._text = QTextEdit()
         self._text.setReadOnly(True)
@@ -116,6 +145,20 @@ class LogViewer(QWidget):
     def clear(self):
         self._entries.clear()
         self._text.clear()
+
+    @Slot(str)
+    def show_alert(self, message: str):
+        """Display a high-signal banner above the log text. Empty message hides it."""
+        if not message:
+            self.hide_alert()
+            return
+        self._alert_label.setText(message)
+        self._alert_frame.setVisible(True)
+
+    @Slot()
+    def hide_alert(self):
+        self._alert_frame.setVisible(False)
+        self._alert_label.setText("")
 
     def _copy_log(self):
         text = "\n".join(msg for msg, _ in self._entries)
