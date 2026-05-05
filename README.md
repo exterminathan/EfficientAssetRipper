@@ -156,16 +156,31 @@ EfficientAssetRipper requires a PSK import addon in Blender. The default is the 
 
 ## First-Time Setup
 
-1. **Launch the app** — the splash screen will play, then the main window appears
-2. **Create a profile** — Click **New** in the profile bar, name it after your game
-3. **Configure paths** in **Settings**:
-   - **Game Folder** — path to the game's content/pak directory
+1. **Launch the app** — the splash screen will play, then the main window
+   appears. The first-run wizard auto-detects Blender, Everything, and
+   .NET if they're installed.
+2. **Configure global tooling paths** in **Settings**:
    - **Blender** — path to `blender.exe`
-   - **Everything DLL** — path to `Everything64.dll` (usually `C:\Program Files\Everything\Everything64.dll`)
-   - **Output Dir** — where `.blend` files will be saved
-   - **CUE4Parse CLI** — path to `CUE4ParseCLI.exe` (in `cue4parse_cli/bin/publish/`)
-4. **Scan** — Click the Scan button to discover assets
-5. **Select & Process** — Check assets in the browser tree, add to queue, and process
+   - **Everything DLL** — path to `Everything64.dll` (usually
+     `C:\Program Files\Everything\Everything64.dll`)
+   - **CUE4Parse CLI** — path to `CUE4ParseCLI.exe` (in
+     `cue4parse_cli/bin/publish/`)
+3. **Create a game profile** in **Manage Profiles**:
+   - **Game folder** — path to the game's content/pak directory
+   - **UE Version** — `GAME_UE5_4` is a sane default; pick the closest
+     match for your title
+   - **Mounted folder** — where the unpacker writes exported files
+   - **Output folder** — where `.blend` files will be saved
+   - **AES Keys** — paste the GUID + key for each `.pak`. Most games
+     use a single GUID of all zeros.
+4. **Scan** — click **Scan Game Folder** to discover meshes
+5. **Select & Process** — check assets in the browser tree, click
+   **Add to Queue**, then **Process Queue**.
+
+If something goes wrong, see
+[docs/troubleshooting.md](docs/troubleshooting.md) for common
+fixes — Everything not running, AES keys, queue resume, and crash
+reports.
 
 ---
 

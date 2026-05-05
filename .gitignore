@@ -44,3 +44,6 @@ desktop.ini
 .idea/
 *.suo
 *.user
+
+# ── AI assistant scratch (project-local notes, never committed) ──────────────
+.claude/

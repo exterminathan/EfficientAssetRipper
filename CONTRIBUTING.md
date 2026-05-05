@@ -24,10 +24,13 @@ python main.py
 
 The architectural shape of the repo (Python GUI / orchestration in `gui/` +
 `core/`, .NET CLI in `cue4parse_cli/`, Blender subprocess scripts in
-`blender/`, etc.) is documented in [CLAUDE.md](CLAUDE.md). Read that first
-before making non-trivial changes — it covers the import boundaries, the
-NDJSON IPC protocol, the texture-resolver heuristics, and the gotchas that
-aren't obvious from a single file read.
+`blender/`, etc.) is documented in [docs/architecture.md](docs/architecture.md).
+Read that first before making non-trivial changes — it covers the import
+boundaries, the NDJSON IPC protocol, the texture-resolver heuristics, and
+the gotchas that aren't obvious from a single file read.
+
+For runtime issues, see [docs/troubleshooting.md](docs/troubleshooting.md).
+For maintainer release steps, see [docs/release-checklist.md](docs/release-checklist.md).
 
 ## Tests
 
