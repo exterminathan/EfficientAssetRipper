@@ -206,6 +206,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
+        self._refresh_blender_dependent_ui()
         self._load_initial_profile()
         # Defer the setup wizard until after splash → window handoff so the
         # modal dialog doesn't fight the splash for focus.
@@ -440,7 +441,7 @@ class MainWindow(QMainWindow):
         exit_action.setMenuRole(QAction.MenuRole.NoRole)
 
         tools_menu = menubar.addMenu("&Tools")
-        tools_menu.addAction(
+        self._blend_combiner_action = tools_menu.addAction(
             "&Blend Combiner",
             lambda: self._right_tabs.setCurrentWidget(self._combiner),
         )
@@ -592,7 +593,46 @@ class MainWindow(QMainWindow):
 
     def _on_settings_changed(self):
         reset_sdk()
+        # Re-evaluate Blender availability — the user may have just set the
+        # path or pointed it at a missing binary.
+        from core.blender_runner import reset_blender_validation_cache
+        reset_blender_validation_cache()
+        self._refresh_blender_dependent_ui()
         self._log.append("Settings updated", "info")
+
+    def _refresh_blender_dependent_ui(self):
+        """Enable/disable Blender-touching UI based on ``is_blender_available()``.
+
+        Called once on startup and whenever settings change. Keeps the Blend
+        Combiner tab visible-but-greyed when Blender is missing so the user
+        sees the feature exists; the Process Queue button is hard-disabled
+        and the status bar carries a persistent reminder.
+        """
+        from core.blender_runner import is_blender_available
+        available = is_blender_available()
+
+        combiner_idx = self._right_tabs.indexOf(self._combiner)
+        if combiner_idx != -1:
+            self._right_tabs.setTabEnabled(combiner_idx, available)
+            self._right_tabs.setTabText(
+                combiner_idx,
+                "Blend Combiner" if available else "Blend Combiner (no Blender)",
+            )
+
+        if hasattr(self, "_blend_combiner_action") and self._blend_combiner_action is not None:
+            self._blend_combiner_action.setEnabled(available)
+
+        if available:
+            tip = ""
+        else:
+            tip = "Blender not configured — set blender_exe in Settings."
+        self._queue.set_processing_enabled(available, tooltip=tip)
+
+        if not available:
+            self._statusbar.showMessage(
+                "Blender not found — processing & Blend Combiner disabled. "
+                "Set the path in Settings."
+            )
 
     # ------------------------------------------------------------------
     # Scanning
@@ -1066,7 +1106,8 @@ class MainWindow(QMainWindow):
         if not blender_exe:
             QMessageBox.warning(
                 self, "Blender Not Set",
-                "Set the Blender executable path in Settings."
+                "Set the Blender executable path in Settings.\n\n"
+                "Until then, Process Queue and the Blend Combiner tab are disabled."
             )
             return
 

@@ -364,8 +364,9 @@ class SettingsDialog(QDialog):
         else:
             results.append(("Blender", False, "Not set"))
 
-        # 3. Everything SDK
+        # 3. Everything SDK (with WalkSearcher fallback)
         dll_path = self.everything_dll.text()
+        everything_ipc_ok = False
         if dll_path and os.path.isfile(dll_path):
             results.append(("Everything DLL", True, f"Found: {dll_path}"))
             try:
@@ -375,6 +376,7 @@ class SettingsDialog(QDialog):
 
                 # Test IPC connection
                 ok, msg = sdk.test_connection()
+                everything_ipc_ok = ok
                 results.append(("Everything IPC", ok, msg))
 
                 # Test folder search if active profile's game folder is set
@@ -398,6 +400,14 @@ class SettingsDialog(QDialog):
             results.append(("Everything DLL", False, f"File not found: {dll_path}"))
         else:
             results.append(("Everything DLL", False, "Not set"))
+
+        if not everything_ipc_ok:
+            results.append((
+                "File Search Fallback",
+                True,
+                "Using built-in walker — slower than Everything but works offline. "
+                "Install/launch Everything (https://www.voidtools.com/) for faster scans.",
+            ))
 
         # 5. Presets JSON
         pp = self.presets_path.text()

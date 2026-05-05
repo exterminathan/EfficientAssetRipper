@@ -63,7 +63,14 @@ def test_help_menu_has_setup_wizard_action(main_window):
 
 def test_status_bar_initial_message(main_window):
     msg = main_window._statusbar.currentMessage()
-    assert "Ready" in msg or "Configure" in msg or "configure" in msg
+    # Either the standard ready message, or the Blender-missing warning when
+    # the test environment doesn't have Blender installed.
+    assert (
+        "Ready" in msg
+        or "Configure" in msg
+        or "configure" in msg
+        or "Blender" in msg
+    )
 
 
 def test_left_tabs_have_browser_picker_unpacker(main_window):
@@ -76,7 +83,8 @@ def test_left_tabs_have_browser_picker_unpacker(main_window):
 def test_right_tabs_have_queue_log_and_combiner(main_window):
     titles = [main_window._right_tabs.tabText(i) for i in range(main_window._right_tabs.count())]
     assert "Queue / Log" in titles
-    assert "Blend Combiner" in titles
+    # Tab is renamed when Blender is unavailable in the test env.
+    assert any(t.startswith("Blend Combiner") for t in titles)
 
 
 def test_is_busy_false_initially(main_window):

@@ -312,19 +312,52 @@ class EverythingSDK:
         return [Path(p) for p in raw]
 
 
-# Singleton (lazily initialized)
-_instance: Optional[EverythingSDK] = None
+# Singleton (lazily initialized). Holds either a real EverythingSDK or a
+# WalkSearcher fallback — both expose the same find_*/search_*/test_* surface.
+_instance = None  # type: ignore[var-annotated]
 _instance_lock = threading.Lock()
 
 
-def get_sdk(dll_path: Optional[str] = None) -> EverythingSDK:
+def get_sdk(dll_path: Optional[str] = None):
+    """Return a usable file-search backend.
+
+    Tries Everything first; falls back to a built-in walker if the DLL can't
+    load or the IPC handshake fails. Callers should treat the return value as
+    duck-typed against the EverythingSDK surface.
+    """
     global _instance
     # Double-checked locking: avoid taking the lock on the hot path.
     if _instance is None:
         with _instance_lock:
             if _instance is None:
-                _instance = EverythingSDK(dll_path)
+                _instance = _build_backend(dll_path)
     return _instance
+
+
+def _build_backend(dll_path: Optional[str]):
+    """Build EverythingSDK if possible, else WalkSearcher."""
+    from core.file_search import WalkSearcher
+    try:
+        sdk = EverythingSDK(dll_path)
+    except EverythingError as e:
+        log = __import__("logging").getLogger(__name__)
+        log.warning(
+            "Everything SDK unavailable (%s) — falling back to built-in walker", e
+        )
+        return WalkSearcher()
+    # Verify the IPC channel; if it fails the DLL is loaded but the
+    # Everything desktop app isn't running.
+    try:
+        ok, msg = sdk.test_connection()
+    except Exception as e:  # noqa: BLE001 — defensive
+        ok, msg = False, str(e)
+    if not ok:
+        log = __import__("logging").getLogger(__name__)
+        log.warning(
+            "Everything IPC check failed (%s) — falling back to built-in walker", msg
+        )
+        return WalkSearcher()
+    return sdk
 
 
 def reset_sdk():
@@ -334,9 +367,13 @@ def reset_sdk():
         _instance = None
     if old is None:
         return
-    # Drop the DLL handle so a stale path doesn't linger between settings changes.
+    # Only the real EverythingSDK has a DLL handle to release; the walker
+    # is a plain Python object.
+    dll = getattr(old, "_dll", None)
+    if dll is None:
+        return
     try:
-        handle = getattr(old._dll, "_handle", None)
+        handle = getattr(dll, "_handle", None)
         if handle:
             import _ctypes  # type: ignore[attr-defined]
             try:
@@ -350,3 +387,9 @@ def reset_sdk():
             old._dll = None  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             pass
+
+
+def is_using_walker_fallback() -> bool:
+    """Return True if the current SDK is the WalkSearcher fallback (not Everything)."""
+    from core.file_search import WalkSearcher
+    return isinstance(_instance, WalkSearcher)

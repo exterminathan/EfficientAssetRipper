@@ -728,6 +728,33 @@ def current_scheme_name() -> str:
     return _current_scheme_name
 
 
+def install_combo_click_to_popup(combo) -> None:
+    """Make an editable QComboBox open its popup when its line-edit is clicked.
+
+    Editable combos give focus on click but never open the popup — the user has
+    to hit the 24 px arrow on the right. This installs an event filter on the
+    line-edit so a press anywhere on the field opens the dropdown while typing
+    still works once it's open.
+    """
+    from PySide6.QtCore import QEvent, QObject
+
+    line_edit = combo.lineEdit()
+    if line_edit is None:
+        return
+
+    class _ClickFilter(QObject):
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Type.MouseButtonPress and not combo.view().isVisible():
+                combo.showPopup()
+                return False
+            return False
+
+    flt = _ClickFilter(combo)
+    line_edit.installEventFilter(flt)
+    # Keep a strong ref on the combo so the filter isn't GC'd.
+    combo._click_to_popup_filter = flt  # type: ignore[attr-defined]
+
+
 def apply(app: QApplication, scheme_name: str | None = None) -> None:
     """Apply a colour scheme to the running application.
 

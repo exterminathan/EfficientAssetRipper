@@ -194,6 +194,23 @@ def reset_blender_validation_cache() -> None:
     _BLENDER_VALIDATION_CACHE.clear()
 
 
+def is_blender_available() -> bool:
+    """Return True if the configured ``blender_exe`` exists and self-identifies.
+
+    Reuses the per-binary validation cache so this is a no-op on every call
+    after the first. Called from ``MainWindow`` to gate Blender-dependent UI.
+    """
+    try:
+        import config  # local import keeps the module independent of Qt at load
+        blender_exe = config.get("blender_exe")
+    except Exception:  # noqa: BLE001
+        return False
+    if not blender_exe:
+        return False
+    ok, _msg = _validate_blender_exe(blender_exe)
+    return ok
+
+
 @dataclass
 class BlenderResult:
     success: bool

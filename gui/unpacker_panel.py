@@ -6,7 +6,7 @@ import json
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui.theme import install_combo_click_to_popup
 from gui.widgets import CollapsibleSection, ZoomableTree
 
 import config
@@ -105,7 +106,14 @@ class UnpackerPanel(QWidget):
         return self._exporting
 
     def load_from_profile(self, profile: dict) -> None:
-        """Populate UI fields from a profile dict (does NOT auto-mount)."""
+        """Populate UI fields from a profile dict.
+
+        If the user had archives mounted in this session, auto-remount on the
+        next event-loop tick so the tree doesn't go visually empty after a
+        Manage Profiles edit. The first-ever profile open never auto-mounts —
+        the user must opt in by clicking Mount Archives once.
+        """
+        was_mounted = self._mounted
         self._ue_version_user_set = False
         self._game_dir_edit.setText(profile.get("game_dir", ""))
 
@@ -147,6 +155,13 @@ class UnpackerPanel(QWidget):
             self._wwise_audio_map = {}
             self._wwise_scan_done = False
             self._pending_wwise_export = None
+
+        # Auto-remount when the previous profile was already mounted in this
+        # session. Defer to the next event-loop tick so the dialog finishes
+        # closing before we touch the unpacker QProcess.
+        if was_mounted and self._game_dir_edit.text().strip() and self._get_aes_keys():
+            self._status_label.setText("Profile changed — remounting...")
+            QTimer.singleShot(0, self._mount_archives)
 
     def collect_for_profile(self) -> dict:
         """Collect current UI state as a dict fragment for saving to a profile."""
@@ -194,6 +209,7 @@ class UnpackerPanel(QWidget):
         self._ue_version_combo = QComboBox()
         self._ue_version_combo.setEditable(True)
         self._ue_version_combo.addItems(_UE_VERSIONS)
+        install_combo_click_to_popup(self._ue_version_combo)
         saved_ver = config.get("unpack_ue_version")
         if saved_ver in _UE_VERSIONS:
             self._ue_version_combo.setCurrentText(saved_ver)

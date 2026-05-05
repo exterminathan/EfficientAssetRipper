@@ -158,6 +158,16 @@ class QueuePanel(QWidget):
         self._process_btn.setEnabled(not enabled)
         self._cancel_btn.setEnabled(enabled)
 
+    def set_processing_enabled(self, enabled: bool, tooltip: str = ""):
+        """Allow MainWindow to disable Process Queue when Blender is missing.
+
+        Different from ``set_processing()`` (which toggles based on a *running*
+        batch). This is for hard-disabling the button when Blender isn't
+        installed, with an explanatory tooltip.
+        """
+        self._process_btn.setEnabled(enabled)
+        self._process_btn.setToolTip(tooltip)
+
     @Slot(int, str)
     def on_job_started(self, index: int, name: str):
         row = self._batch_offset + index

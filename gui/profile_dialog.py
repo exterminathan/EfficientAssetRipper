@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.profile_manager import ProfileLoadError, ProfileManager
+from gui.theme import install_combo_click_to_popup
 from gui.widgets import CollapsibleSection, PathPicker
 
 log = logging.getLogger(__name__)
@@ -405,6 +406,7 @@ class _ProfileEditor(QWidget):
         self._ue_combo = QComboBox()
         self._ue_combo.setEditable(True)
         self._ue_combo.addItems(_UE_VERSIONS)
+        install_combo_click_to_popup(self._ue_combo)
         self._ue_combo.currentTextChanged.connect(self._on_changed)
         mount_form.addRow("UE Version:", self._ue_combo)
 
