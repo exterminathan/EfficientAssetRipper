@@ -4,9 +4,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # Update each pinned `uses: foo/bar@<sha>` line to the latest release SHA
-    # without touching the version comment unless we accept the bump.
-    open-pull-requests-limit: 5
+    # Collapse all action bumps into a single weekly PR / branch instead of
+    # one branch per dependency.
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     labels:
       - dependencies
       - github-actions

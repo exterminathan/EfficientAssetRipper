@@ -7,6 +7,7 @@ real process is spawned.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from unittest.mock import MagicMock
 
@@ -103,8 +104,12 @@ def test_validate_re_runs_when_mtime_changes(monkeypatch, tmp_path):
 
     monkeypatch.setattr(br.subprocess, "run", _fake_run)
     _validate_blender_exe(str(p))
-    # Touch the file so the cached mtime no longer matches.
+    # Bump mtime explicitly. Two back-to-back write_bytes() calls can land in
+    # the same NTFS tick on fast Windows runners, leaving st_mtime_ns
+    # unchanged and tripping the validator's mtime fast-path.
     p.write_bytes(p.read_bytes() + b"\x00")
+    st = p.stat()
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
     _validate_blender_exe(str(p))
     assert counter["n"] == 2
 

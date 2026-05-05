@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-04
+
+Pre-1.0 hardening release. Sweeping security, reliability, and UX pass across
+the GUI, Blender pipeline, CUE4ParseCLI, and the CI/release chain.
+
+### Added
+- **Manage Profiles dialog** — per-profile game/output/unpack paths, AES keys,
+  mappings, and UE version live in a dedicated dropdown + editor instead of the
+  global Settings panel.
+- **Custom color scheme editor** with live swatches alongside the four built-in
+  themes.
+- **Release verification** — every ZIP ships `SHA256SUMS` and a signed
+  build-provenance attestation; release notes embed `sha256sum --check` and
+  `gh attestation verify` snippets.
+- **Setup wizard** reachable from the Help menu (previously first-run only).
+- **CHANGELOG enforcement** — release workflow refuses to publish a tag without
+  a matching changelog block.
+- **CUE4ParseCLI `--help` / `-h` / `/?`** usage banner.
+- **Per-run nonce protocol** — Blender stdout is only trusted on
+  `##ASSET_STATUS:<nonce>##` lines so unrelated output can't masquerade as
+  status. Mirrored in the blend combiner.
+- **Test coverage** grew from ~250 to ~470 tests across unit / integration / Qt
+  tiers; new e2e smoke suite for the real CUE4ParseCLI binary under
+  [tests/e2e/](tests/e2e/).
+
+### Changed
+- **Profile bar** collapsed to a dropdown plus a single Manage Profiles button.
+  Unpacker-tab edits no longer leak back into the saved profile unless
+  `auto_save_paths` is set.
+- **PathPicker** widget hoisted into [gui/widgets.py](gui/widgets.py) for
+  consistent path field UX.
+- **Filter rebuilds** in PSK picker, asset browser, and text viewer are
+  debounced — 40k-asset folders stay responsive while typing.
+- **Audio and image previewers** decode and `rmtree` on `QThreadPool` with
+  token-based invalidation so stale loads can't overwrite the active selection.
+- **Texture classifier** uses longest-suffix-wins with `priority_order` from
+  the preset JSON breaking ties — `_OR` can no longer shadow `_ORM`.
+- **Material parent chain** capped at depth 32; case-mixed cycles terminate.
+- **Closest-path tiebreaker** deterministic (path-len, then lower-cased
+  string), insulating picks from candidate-list shuffles.
+- **Scan cache** version mismatches archived to `scan_*.json.bak.<ts>`; backups
+  older than 30 days pruned on launch.
+- **Processed-state auto-detect** symmetric — deleting a `.blend` flips state
+  back to False on the next load.
+- **JobManager** terminates the live Blender subprocess on cancel and emits
+  `asset_updated(idx, state_dict)` for GUI-thread state application instead of
+  cross-thread mutation.
+- **MainWindow** tracks worker threads, drains them on close, and writes scan
+  caches off-thread.
+- **`build.bat`** runs the fast test tiers as step `[0b/5]` and aborts on
+  failure; CI builds fail if the CLI cannot be built or `version_info.txt`
+  generation errors out.
+- **`build_cli.bat`** uses `--self-contained true` + `PublishSingleFile` so
+  dev rebuilds match the shipped artifact.
+- **`sync.ps1`** restore is non-destructive; backup additive unless `-Force`.
+- **Dependabot** collapsed to a single weekly grouped PR for GitHub Actions
+  updates.
+- **CI actions** pinned to full SHA + version; default permissions
+  `contents: read`, write scopes opted into per-job.
+- **`PY_PYTHON=3.11`** pinned in CI so the `py` launcher doesn't pick the
+  runner's 3.14 (no PySide6 wheels). PySide6 upper bound bumped to `<7.0`.
+
+### Fixed
+- Alert banner colors and swatch borders now follow the active scheme.
+- Long asset paths wrap and are selectable instead of clipping.
+- Blender pipe-drain failures are logged instead of swallowed.
+- Settings dialog validates path-typed fields before save, clamps the timeout,
+  and opens presets via `QDesktopServices`.
+- `Theme.apply` skips no-op reapplies and only registers fonts once per process.
+- Splash always closes even if the finish callback throws.
+- Detail dialogs use `WA_DeleteOnClose`; menu actions gain `&`-mnemonics and
+  standard shortcut keys.
+- PSK `MATT` chunk parser bound-checks dims, returns `(names, ok)` so corrupt
+  PSKs surface as `scan_failed`, and falls back utf-8 / cp1252 / ascii on
+  material name decode.
+- [blender/material_setup.py](blender/material_setup.py) uses named mix-node
+  sockets and a `BSDF_RENAMES` table for Blender 4.x socket names
+  (Subsurface / Specular / Transmission / Sheen / Clearcoat).
+- [blender/process_asset.py](blender/process_asset.py) treats `CANCELLED` and
+  "no mesh produced" as hard failures; `.blend` save is atomic (tmp file →
+  `os.replace`) with a non-zero size check.
+- [blender/combine_blends.py](blender/combine_blends.py) refuses to save when
+  nothing was appended.
+- [core/props_parser.py](core/props_parser.py) reads `utf-8-sig`, parses RGBA
+  in any order, logs JSON errors with lineno/msg.
+- `build.bat` parens inside `if (...)` blocks escaped — fixes the
+  `was unexpected at this time.` abort at step `[3/5]`.
+- `test_validate_re_runs_when_mtime_changes` flake — explicit `os.utime` bump
+  instead of relying on two consecutive `write_bytes` calls landing in distinct
+  NTFS mtime ticks. Was the sole cause of the recent CI test-gate failures.
+
+### Security
+- **Path traversal** — `ProfileManager` CRUD routes through `_safe_path`,
+  blocking `..\`, reserved Windows device names, and inputs that resolve
+  outside `profiles/`. CUE4ParseCLI gains `SafeJoin()` at every write site
+  (mesh / texture / anim / props / Wwise audio).
+- **DLL planting** — `Everything64.dll` loader requires an absolute path and
+  passes `LOAD_LIBRARY_SEARCH_SYSTEM32`; bare filenames rejected.
+- **Secret redaction** — new [core/log_redaction.py](core/log_redaction.py)
+  masks `key` / `aes` / `password` / `token` / `secret` fields and inline hex
+  blobs ≥ 32 chars across the root logger, the Blender cmd/stderr surface, and
+  job log entries.
+- **AES error messages** no longer echo raw bytes.
+- **Update check** — GitHub responses capped at 64 KB, `tag_name`
+  shape-validated, off-host redirects refused, non-`github.com` release URLs
+  stripped before render.
+- **NDJSON DoS** — CUE4ParseCLI child killed if its stdout buffer exceeds
+  16 MB without a newline.
+- **Blender identity probe** — `--version` checked once per session; refuses
+  to spawn the render subprocess if the banner isn't Blender. Manifest
+  allowlist (psk extension, absolute output path, `.blend` suffix,
+  outputs-root containment, image-extension texture paths) enforced both
+  Python-side and Blender-side.
+- **Supply chain** — Oodle and vgmstream downloads pinned to tag + SHA-256;
+  per-entry zip extraction blocks zip-slip.
+- **vgmstream invocation** uses `ProcessStartInfo.ArgumentList`, eliminating
+  the prior shell-quoting injection surface.
+- **Newtonsoft** pinned to `TypeNameHandling.None`.
+- **Stdin oversize cap** — 4 MB per-line limit on CUE4ParseCLI.
+- **Release tag** must be an ancestor of `origin/main` before publish.
+
 ## [0.5.0] - 2026-04-26
 
 Initial public beta release.
@@ -46,5 +167,6 @@ Initial public beta release.
   `requires_dotnet_cli` e2e markers.
 - **MIT License** and legal disclaimer for asset extraction usage.
 
-[Unreleased]: https://github.com/exterminathan/EfficientAssetRipper/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/exterminathan/EfficientAssetRipper/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.0
 [0.5.0]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.5.0
