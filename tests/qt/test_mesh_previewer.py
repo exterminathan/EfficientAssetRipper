@@ -106,15 +106,53 @@ def test_mesh_previewer_clear_resets_to_placeholder(qtbot, tmp_path: Path):
     assert p._status_name.text() == ""
 
 
-def test_meshglview_orbit_camera_clamps_elevation(qtbot):
-    """Spamming downward drag must not flip the camera through the south pole."""
-    import math
+def test_meshglview_orbit_camera_unlimited(qtbot):
+    """Quaternion orbit must support full 360° rotation in any direction —
+    no clamping, no degenerate state when crossing the poles."""
+    import numpy as np
+    from gui.mesh_previewer import (
+        _quat_axis_angle,
+        _quat_mul,
+        _quat_normalize,
+    )
+
     v = _MeshGLView()
     qtbot.addWidget(v)
-    v._elevation = 0.0
-    # Push elevation way past the limit
-    for _ in range(1000):
-        v._elevation += 0.1
-        if v._elevation > math.radians(89.0):
-            v._elevation = math.radians(89.0)
-    assert v._elevation <= math.radians(89.0) + 1e-6
+
+    # Spam pitch all the way past the pole and back. Without clamping and
+    # with quaternion accumulation, orientation must stay normalized.
+    for _ in range(2000):
+        pitch = _quat_axis_angle((1.0, 0.0, 0.0), 0.05)
+        v._orientation = _quat_normalize(_quat_mul(v._orientation, pitch))
+
+    norm = float(np.linalg.norm(v._orientation))
+    assert abs(norm - 1.0) < 1e-6, f"quaternion drifted: |q|={norm}"
+
+    # And spam yaw the same way — the camera must accept any total angle.
+    for _ in range(2000):
+        yaw = _quat_axis_angle((0.0, 1.0, 0.0), 0.05)
+        v._orientation = _quat_normalize(_quat_mul(yaw, v._orientation))
+
+    norm = float(np.linalg.norm(v._orientation))
+    assert abs(norm - 1.0) < 1e-6
+
+
+def test_meshglview_default_orientation_is_unit(qtbot):
+    import numpy as np
+    v = _MeshGLView()
+    qtbot.addWidget(v)
+    assert abs(float(np.linalg.norm(v._orientation)) - 1.0) < 1e-6
+
+
+def test_meshglview_reset_view_restores_default_orientation(qtbot):
+    import numpy as np
+    from gui.mesh_previewer import _quat_axis_angle
+
+    v = _MeshGLView()
+    qtbot.addWidget(v)
+    default = v._orientation.copy()
+    v._orientation = _quat_axis_angle((1.0, 0.0, 0.0), 1.234)
+    assert not np.allclose(v._orientation, default)
+
+    v.reset_view()
+    np.testing.assert_allclose(v._orientation, default, atol=1e-9)

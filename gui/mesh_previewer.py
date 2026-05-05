@@ -14,7 +14,7 @@ from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import Qt, QObject, QPoint, QRunnable, QThreadPool, Signal
-from PySide6.QtGui import QImage, QMouseEvent, QPainter, QSurfaceFormat, QVector3D, QWheelEvent
+from PySide6.QtGui import QImage, QMouseEvent, QPainter, QSurfaceFormat, QWheelEvent
 from PySide6.QtOpenGL import (
     QOpenGLBuffer,
     QOpenGLShader,
@@ -162,6 +162,57 @@ def _look_at(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Quaternion helpers — orbit camera. Storing as numpy (w, x, y, z), float64
+# for accumulation precision; only converted to mat3 for upload.
+# Used instead of Euler azimuth/elevation so the camera can pass through the
+# poles without gimbal lock.
+# ---------------------------------------------------------------------------
+
+_QUAT_IDENTITY = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+
+
+def _quat_axis_angle(axis, angle: float) -> np.ndarray:
+    a = np.asarray(axis, dtype=np.float64)
+    n = np.linalg.norm(a)
+    if n < 1e-12:
+        return _QUAT_IDENTITY.copy()
+    a = a / n
+    half = angle * 0.5
+    s = math.sin(half)
+    return np.array([math.cos(half), a[0] * s, a[1] * s, a[2] * s], dtype=np.float64)
+
+
+def _quat_mul(p: np.ndarray, q: np.ndarray) -> np.ndarray:
+    pw, px, py, pz = p
+    qw, qx, qy, qz = q
+    return np.array([
+        pw * qw - px * qx - py * qy - pz * qz,
+        pw * qx + px * qw + py * qz - pz * qy,
+        pw * qy - px * qz + py * qw + pz * qx,
+        pw * qz + px * qy - py * qx + pz * qw,
+    ], dtype=np.float64)
+
+
+def _quat_normalize(q: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(q)
+    if n < 1e-12:
+        return _QUAT_IDENTITY.copy()
+    return q / n
+
+
+def _quat_to_mat3(q: np.ndarray) -> np.ndarray:
+    w, x, y, z = q
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    return np.array([
+        [1 - 2 * (yy + zz), 2 * (xy - wz),     2 * (xz + wy)],
+        [2 * (xy + wz),     1 - 2 * (xx + zz), 2 * (yz - wx)],
+        [2 * (xz - wy),     2 * (yz + wx),     1 - 2 * (xx + yy)],
+    ], dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
 # OpenGL viewport widget
 # ---------------------------------------------------------------------------
 
@@ -178,9 +229,9 @@ class _MeshGLView(QOpenGLWidget):
         self._mesh: Optional[PskMesh] = None
         self._mode: str = "flat"
 
-        # Camera state — locked target, no panning.
-        self._azimuth = 0.6      # radians
-        self._elevation = 0.4
+        # Camera state — locked target, no panning. Quaternion orientation
+        # gives full 360° orbit through the poles without gimbal lock.
+        self._orientation: np.ndarray = self._default_orientation()
         self._distance = 3.0
         self._target = np.zeros(3, dtype=np.float32)
 
@@ -225,6 +276,13 @@ class _MeshGLView(QOpenGLWidget):
         self._flat_color = (0.62, 0.64, 0.67)
 
     @staticmethod
+    def _default_orientation() -> np.ndarray:
+        """Pleasant 3/4-front view: yaw ~35° then pitch ~20° down."""
+        yaw = _quat_axis_angle((0, 1, 0), math.radians(35.0))
+        pitch = _quat_axis_angle((1, 0, 0), math.radians(-20.0))
+        return _quat_normalize(_quat_mul(yaw, pitch))
+
+    @staticmethod
     def _hex_to_rgb(s: str) -> tuple[float, float, float]:
         s = s.lstrip("#")
         if len(s) == 3:
@@ -249,9 +307,8 @@ class _MeshGLView(QOpenGLWidget):
         if mesh is not None:
             self._target = mesh.center.copy()
             self._distance = max(mesh.radius * 2.5, 0.5)
-            # Reset camera angles to a friendly default each load.
-            self._azimuth = 0.6
-            self._elevation = 0.4
+            # Reset to friendly default orientation each load.
+            self._orientation = self._default_orientation()
 
         # Stat-strip listeners (and headless tests) only care that data arrived,
         # not whether GL has finished uploading. Emit unconditionally for non-None
@@ -299,8 +356,7 @@ class _MeshGLView(QOpenGLWidget):
         if self._mesh is not None:
             self._distance = max(self._mesh.radius * 2.5, 0.5)
             self._target = self._mesh.center.copy()
-        self._azimuth = 0.6
-        self._elevation = 0.4
+        self._orientation = self._default_orientation()
         self.update()
 
     # ------------------------------------------------------------------
@@ -363,19 +419,32 @@ class _MeshGLView(QOpenGLWidget):
                 pass
 
     def _render_frame(self, GL):
+        # Hard state reset — never trust the previous frame. Without this,
+        # leftover GL_LINE polygon mode from a wireframe pass leaks into the
+        # next flat/UV pass, and CULL_FACE state accumulates across modes.
+        GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
+        GL.glEnable(GL.GL_DEPTH_TEST)
+        GL.glDepthFunc(GL.GL_LEQUAL)
+        # Disable culling: PSK winding from CUE4Parse exports is mixed
+        # (Unreal LH ↔ OpenGL RH conversion + some game-specific flips), so
+        # culling either side leaves part of the mesh invisible. Doubling
+        # back-face draws is cheap for preview.
+        GL.glDisable(GL.GL_CULL_FACE)
+
         GL.glClearColor(*self._bg_color, 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
 
         if self._index_count == 0:
             return
 
-        # Camera position from spherical coords.
-        cx = math.cos(self._elevation) * math.sin(self._azimuth)
-        cy = math.sin(self._elevation)
-        cz = math.cos(self._elevation) * math.cos(self._azimuth)
-        eye = self._target + np.array([cx, cy, cz], dtype=np.float32) * self._distance
-
-        view = _look_at(eye, self._target, np.array([0, 1, 0], dtype=np.float32))
+        # Quaternion-based camera: orientation is applied as the rotation that
+        # carries the world frame into camera frame. Eye starts on +Z relative
+        # to the camera's local frame, then rotates with orientation so any
+        # quaternion (no clamps, no poles) produces a valid look-at.
+        rot = _quat_to_mat3(self._orientation)
+        eye = self._target + (rot @ np.array([0, 0, 1.0], dtype=np.float32)) * self._distance
+        up = rot @ np.array([0, 1.0, 0], dtype=np.float32)
+        view = _look_at(eye, self._target, up)
         aspect = max(self.width(), 1) / max(self.height(), 1)
         # Near/far clamped to mesh scale to keep depth precision usable.
         radius = self._mesh.radius if self._mesh is not None else 1.0
@@ -388,37 +457,34 @@ class _MeshGLView(QOpenGLWidget):
 
         program = self._programs[self._mode]
         program.bind()
-        program.setUniformValue("u_mvp", _to_qmatrix(mvp))
-        program.setUniformValue("u_model", _to_qmatrix(model))
 
-        # PySide6's setUniformValue overload resolution doesn't reliably pick
-        # glUniform1i for sampler bindings or vec3 setters from raw Python
-        # floats. Use QVector3D for vec3 uniforms and a direct glUniform1i call
-        # for the sampler — that's what triggered the GL_INVALID_OPERATION on
-        # UV-grid mode in the wild.
-        light_dir = QVector3D(0.4, 0.7, 0.5)
+        # Use direct glUniform* calls everywhere. PySide6's setUniformValue
+        # overload resolution from raw Python floats / ints is unreliable for
+        # vec3 and sampler uniforms — that's what produced the original
+        # UV-grid GL_INVALID_OPERATION crash and what was leaving the wire
+        # shader's u_wire_color undefined (rendering near-black, "invisible").
+        _set_uniform_mat4(GL, program, "u_mvp", mvp)
+        _set_uniform_mat4(GL, program, "u_model", model)
 
         if self._mode == "flat":
-            program.setUniformValue("u_base_color", QVector3D(*self._flat_color))
-            program.setUniformValue("u_light_dir", light_dir)
+            _set_uniform_3f(GL, program, "u_base_color", *self._flat_color)
+            _set_uniform_3f(GL, program, "u_light_dir", 0.4, 0.7, 0.5)
         elif self._mode == "uv":
-            program.setUniformValue("u_light_dir", light_dir)
+            _set_uniform_3f(GL, program, "u_light_dir", 0.4, 0.7, 0.5)
             GL.glActiveTexture(GL.GL_TEXTURE0)
             self._checker.bind()
-            loc = program.uniformLocation("u_checker")
-            if loc >= 0:
-                GL.glUniform1i(loc, 0)
+            _set_uniform_1i(GL, program, "u_checker", 0)
         else:  # wire
-            program.setUniformValue("u_wire_color", QVector3D(*self._wire_color))
+            _set_uniform_3f(GL, program, "u_wire_color", *self._wire_color)
 
         self._vao.bind()
         if self._mode == "wire":
             GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE)
             GL.glLineWidth(1.2)
-            GL.glDisable(GL.GL_CULL_FACE)
             GL.glDrawElements(GL.GL_TRIANGLES, self._index_count, GL.GL_UNSIGNED_INT, None)
-            GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
-            GL.glEnable(GL.GL_CULL_FACE)
+            # Polygon mode is reset at the top of the next frame — no need
+            # to reset here. Resetting mid-frame after a draw was the path
+            # that went wrong before (one stray exception left LINE sticky).
         else:
             GL.glDrawElements(GL.GL_TRIANGLES, self._index_count, GL.GL_UNSIGNED_INT, None)
         self._vao.release()
@@ -529,17 +595,16 @@ class _MeshGLView(QOpenGLWidget):
         dy = cur.y() - self._last_mouse.y()
         self._last_mouse = cur
 
-        # Orbit: x → azimuth, y → elevation. Scale with viewport size for
-        # consistent feel on big or small viewports.
+        # Quaternion-based orbit: full 360° in any direction, no gimbal lock.
+        # X-drag = yaw around the world up axis (pre-multiply, world space).
+        # Y-drag = pitch around the camera's local right axis (post-multiply,
+        # local space) so up/down feels consistent regardless of orientation.
         scale = 0.005
-        self._azimuth -= dx * scale
-        self._elevation += dy * scale
-        # Clamp elevation off the poles to avoid look-at degeneracy.
-        max_elev = math.radians(89.0)
-        if self._elevation > max_elev:
-            self._elevation = max_elev
-        elif self._elevation < -max_elev:
-            self._elevation = -max_elev
+        yaw_q = _quat_axis_angle((0.0, 1.0, 0.0), -dx * scale)
+        pitch_q = _quat_axis_angle((1.0, 0.0, 0.0), -dy * scale)
+        self._orientation = _quat_normalize(
+            _quat_mul(yaw_q, _quat_mul(self._orientation, pitch_q))
+        )
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
@@ -570,12 +635,31 @@ def _gl_offset(byte_offset: int):
     return ctypes.c_void_p(byte_offset) if byte_offset else None
 
 
-def _to_qmatrix(m: np.ndarray):
-    """Convert a (4,4) numpy mat into a QMatrix4x4 for shader uniform upload."""
-    from PySide6.QtGui import QMatrix4x4
-    flat = m.astype(np.float32).flatten().tolist()
-    # numpy is row-major; QMatrix4x4 ctor takes 16 args in row-major order.
-    return QMatrix4x4(*flat)
+def _set_uniform_mat4(GL, program, name: str, mat: np.ndarray) -> None:
+    """Upload a 4×4 numpy matrix to a mat4 uniform. Row-major in numpy →
+    transpose=GL_TRUE for OpenGL's column-major expectation.
+
+    Direct glUniformMatrix4fv bypasses PySide6's setUniformValue overload
+    ambiguity that was the root cause of the original UV-grid crash."""
+    loc = program.uniformLocation(name)
+    if loc < 0:
+        return
+    flat = np.ascontiguousarray(mat, dtype=np.float32).flatten()
+    GL.glUniformMatrix4fv(loc, 1, GL.GL_TRUE, flat)
+
+
+def _set_uniform_3f(GL, program, name: str, x: float, y: float, z: float) -> None:
+    loc = program.uniformLocation(name)
+    if loc < 0:
+        return
+    GL.glUniform3f(loc, float(x), float(y), float(z))
+
+
+def _set_uniform_1i(GL, program, name: str, value: int) -> None:
+    loc = program.uniformLocation(name)
+    if loc < 0:
+        return
+    GL.glUniform1i(loc, int(value))
 
 
 # ---------------------------------------------------------------------------
