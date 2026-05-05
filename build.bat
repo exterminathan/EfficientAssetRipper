@@ -159,6 +159,18 @@ set "CLI_PUB=%TEMP%\CUE4ParseCLI_publish"
 set "CLI_OBJ=%TEMP%\CUE4ParseCLI_obj"
 set "CLI_BIN=%TEMP%\CUE4ParseCLI_bin"
 
+:: Wipe stale build artifacts before publishing. MSBuild reads any pre-existing
+:: AssemblyInfo.cs / TargetFrameworkAttribute files under the in-tree obj\
+:: regardless of BaseIntermediateOutputPath, producing CS0579 duplicate-
+:: attribute errors. Same risk for bin\Release if a prior IDE build left it
+:: behind. bin\publish\ is preserved — it's the fallback for failed rebuilds.
+if exist "%PROJECT_DIR%cue4parse_cli\obj" rmdir /s /q "%PROJECT_DIR%cue4parse_cli\obj"
+if exist "%PROJECT_DIR%cue4parse_cli\bin\Release" rmdir /s /q "%PROJECT_DIR%cue4parse_cli\bin\Release"
+if exist "%PROJECT_DIR%cue4parse_cli\bin\Debug" rmdir /s /q "%PROJECT_DIR%cue4parse_cli\bin\Debug"
+if exist "%CLI_PUB%" rmdir /s /q "%CLI_PUB%"
+if exist "%CLI_OBJ%" rmdir /s /q "%CLI_OBJ%"
+if exist "%CLI_BIN%" rmdir /s /q "%CLI_BIN%"
+
 :: Double trailing backslashes so MSBuild's command-line parser doesn't
 :: treat the closing \" as an escaped quote (which would swallow the next
 :: -p: arg). The doubled \\ collapses to a single \ inside the property.
