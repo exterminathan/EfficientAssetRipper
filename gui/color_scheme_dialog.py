@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -40,6 +41,10 @@ import gui.theme as theme
 
 _BUILTIN = {"Dusk", "Bloom", "Slate", "Midnight"}
 
+# Internal scheme name used while live-previewing edits. Held in the
+# SCHEMES dict only for the lifetime of the dialog and never persisted.
+_PREVIEW_SCHEME_NAME = "__preview__"
+
 
 class ColorSchemeDialog(QDialog):
     """Pick a built-in scheme or customize a user scheme's swatches."""
@@ -54,6 +59,19 @@ class ColorSchemeDialog(QDialog):
         self._custom_colors: dict[str, str] = {}
         self._swatch_buttons: dict[str, QPushButton] = {}
 
+        # Snapshot the originally-active scheme so Cancel / live-toggle-off
+        # can revert cleanly. If the active scheme is custom, we also need
+        # a deep copy of its colour dict in case the user edits it and
+        # cancels — the public SCHEMES entry would otherwise stay mutated.
+        self._original_scheme = (
+            config.get("color_scheme") or theme.current_scheme_name()
+        )
+        original = SCHEMES.get(self._original_scheme)
+        self._original_scheme_colors: dict[str, str] | None = (
+            dict(original) if original is not None else None
+        )
+        self._preview_active = False
+
         outer = QVBoxLayout(self)
 
         # ── Scheme picker row ─────────────────────────────────────────
@@ -61,7 +79,7 @@ class ColorSchemeDialog(QDialog):
         scheme_row.addWidget(QLabel("Scheme:"))
         self._scheme_combo = QComboBox()
         self._scheme_combo.addItems(list_scheme_names())
-        current = config.get("color_scheme") or theme.current_scheme_name()
+        current = self._original_scheme
         if current in [self._scheme_combo.itemText(i) for i in range(self._scheme_combo.count())]:
             self._scheme_combo.setCurrentText(current)
         self._scheme_combo.currentTextChanged.connect(self._on_scheme_changed)
@@ -74,6 +92,22 @@ class ColorSchemeDialog(QDialog):
         self._delete_scheme_btn = QPushButton("Delete Custom")
         self._delete_scheme_btn.clicked.connect(self._delete_custom_scheme)
         scheme_row.addWidget(self._delete_scheme_btn)
+
+        self._reset_btn = QPushButton("Reset to Default")
+        self._reset_btn.setToolTip(
+            "For a custom scheme, reset every colour to the default scheme's "
+            "value. Has no effect on built-in schemes."
+        )
+        self._reset_btn.clicked.connect(self._reset_to_default)
+        scheme_row.addWidget(self._reset_btn)
+
+        self._live_chk = QCheckBox("Apply live")
+        self._live_chk.setToolTip(
+            "Apply colour changes to the running app as you make them. "
+            "Cancel still reverts to the previous scheme."
+        )
+        self._live_chk.toggled.connect(self._on_live_toggled)
+        scheme_row.addWidget(self._live_chk)
 
         scheme_row.addStretch()
         outer.addLayout(scheme_row)
@@ -100,6 +134,7 @@ class ColorSchemeDialog(QDialog):
         self._custom_colors = dict(get_scheme(self._scheme_combo.currentText()))
         self._populate_color_grid()
         self._update_delete_button()
+        self._update_reset_button()
 
     # ------------------------------------------------------------------
     # Selection & grid population
@@ -109,6 +144,9 @@ class ColorSchemeDialog(QDialog):
         self._custom_colors = dict(get_scheme(name))
         self._populate_color_grid()
         self._update_delete_button()
+        self._update_reset_button()
+        if self._live_chk.isChecked():
+            self._apply_preview()
 
     def _populate_color_grid(self):
         while self._color_grid.count():
@@ -171,6 +209,8 @@ class ColorSchemeDialog(QDialog):
                     f"background-color: {hex_val}; border: 1px solid {border_hex}; border-radius: 3px;"
                 )
                 btn.setToolTip(hex_val)
+            if self._live_chk.isChecked():
+                self._apply_preview()
 
     # ------------------------------------------------------------------
     # CRUD
@@ -226,16 +266,95 @@ class ColorSchemeDialog(QDialog):
         name = self._scheme_combo.currentText()
         self._delete_scheme_btn.setEnabled(name not in _BUILTIN)
 
+    def _update_reset_button(self):
+        name = self._scheme_combo.currentText()
+        # The button only does something for editable (custom) schemes;
+        # disable on built-ins so users don't expect an effect that won't
+        # come.
+        self._reset_btn.setEnabled(name not in _BUILTIN)
+
+    def _reset_to_default(self):
+        from gui.color_schemes import DEFAULT_SCHEME
+        name = self._scheme_combo.currentText()
+        if name in _BUILTIN:
+            return
+        confirm = QMessageBox.question(
+            self, "Reset Scheme",
+            f"Reset every colour in '{name}' to the {DEFAULT_SCHEME} defaults?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        defaults = dict(SCHEMES[DEFAULT_SCHEME])
+        register_custom_scheme(name, defaults)
+        self._custom_colors = dict(defaults)
+        self._populate_color_grid()
+        self._save_custom_schemes_to_config()
+        if self._live_chk.isChecked():
+            self._apply_preview()
+
     def _save_custom_schemes_to_config(self):
-        custom = {sname: scolors for sname, scolors in SCHEMES.items() if sname not in _BUILTIN}
+        custom = {sname: scolors for sname, scolors in SCHEMES.items()
+                  if sname not in _BUILTIN and sname != _PREVIEW_SCHEME_NAME}
         config.set("custom_schemes", json.dumps(custom))
 
     # ------------------------------------------------------------------
-    # Accept
+    # Live preview
+    # ------------------------------------------------------------------
+
+    def _on_live_toggled(self, checked: bool):
+        if checked:
+            self._apply_preview()
+        else:
+            self._revert_preview()
+
+    def _apply_preview(self):
+        """Push the currently-selected scheme + edits to the running app."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        scheme_name = self._scheme_combo.currentText()
+        if scheme_name in _BUILTIN:
+            theme.apply(app, scheme_name)
+        else:
+            # Register under a sentinel so cancelling doesn't leave the real
+            # custom-scheme entry mutated.
+            register_custom_scheme(_PREVIEW_SCHEME_NAME, dict(self._custom_colors))
+            theme.apply(app, _PREVIEW_SCHEME_NAME)
+        self._preview_active = True
+
+    def _revert_preview(self):
+        """Restore whatever was active before the dialog opened."""
+        if not self._preview_active:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            # Re-register the original (custom) scheme verbatim in case
+            # earlier edits had previewed under the same name and mutated
+            # the public dict. Built-ins are immutable so this is a no-op
+            # for them.
+            if (
+                self._original_scheme not in _BUILTIN
+                and self._original_scheme_colors is not None
+            ):
+                register_custom_scheme(
+                    self._original_scheme,
+                    dict(self._original_scheme_colors),
+                )
+            theme.apply(app, self._original_scheme)
+        SCHEMES.pop(_PREVIEW_SCHEME_NAME, None)
+        self._preview_active = False
+
+    # ------------------------------------------------------------------
+    # Accept / Reject
     # ------------------------------------------------------------------
 
     def _accept(self):
         scheme_name = self._scheme_combo.currentText()
+        # Preview entry must not leak into persisted state.
+        SCHEMES.pop(_PREVIEW_SCHEME_NAME, None)
+
         config.set("color_scheme", scheme_name)
 
         if self._custom_colors and scheme_name not in _BUILTIN:
@@ -247,4 +366,11 @@ class ColorSchemeDialog(QDialog):
             theme.apply(app, scheme_name)
 
         self.scheme_changed.emit(scheme_name)
+        self._preview_active = False
         self.accept()
+
+    def reject(self):
+        # Throw away any live-preview changes before falling through to
+        # QDialog's default reject.
+        self._revert_preview()
+        super().reject()

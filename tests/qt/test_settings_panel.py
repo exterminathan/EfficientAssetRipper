@@ -112,6 +112,49 @@ def test_settings_dialog_does_not_expose_per_profile_path_fields(qtbot, mock_qse
         )
 
 
+def test_reset_to_defaults_repopulates_widgets_without_saving(qtbot, mock_qsettings, monkeypatch):
+    """Reset is a non-destructive widget refresh — config stays untouched
+    until OK is clicked."""
+    from PySide6.QtWidgets import QMessageBox
+    config.set("psk_addon_name", "stale.addon.name")
+    config.set("timeout_seconds", 1234)  # in-range so the QSpinBox doesn't clamp
+    config.set("export_texture_format", "tga")
+
+    dlg = SettingsDialog()
+    qtbot.addWidget(dlg)
+    # Sanity: the dialog loaded the stale values.
+    assert dlg.addon_name.text() == "stale.addon.name"
+    assert dlg.timeout.value() == 1234
+    assert dlg.texture_format.currentText() == "tga"
+
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **kw: QMessageBox.StandardButton.Yes),
+    )
+    dlg._reset_to_defaults()
+
+    # Widgets show defaults now…
+    assert dlg.addon_name.text() == config._DEFAULTS["psk_addon_name"]
+    assert dlg.timeout.value() == config._DEFAULTS["timeout_seconds"]
+    assert dlg.texture_format.currentText() == config._DEFAULTS["export_texture_format"]
+    # …but config still holds the stale values until the user clicks OK.
+    assert config.get("psk_addon_name") == "stale.addon.name"
+    assert config.get_int("timeout_seconds") == 1234
+
+
+def test_reset_to_defaults_aborts_on_no(qtbot, mock_qsettings, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    config.set("psk_addon_name", "stay.put")
+    dlg = SettingsDialog()
+    qtbot.addWidget(dlg)
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **kw: QMessageBox.StandardButton.No),
+    )
+    dlg._reset_to_defaults()
+    assert dlg.addon_name.text() == "stay.put"
+
+
 def test_open_presets_warns_on_missing_path(qtbot, mock_qsettings, monkeypatch):
     """Opening a non-existent presets file should warn instead of crashing."""
     from PySide6.QtWidgets import QMessageBox

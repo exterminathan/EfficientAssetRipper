@@ -175,10 +175,15 @@ class SettingsDialog(QDialog):
 
         # --- Buttons (outside scroll area, always visible) ---
         buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+            QDialogButtonBox.Ok
+            | QDialogButtonBox.Cancel
+            | QDialogButtonBox.RestoreDefaults
         )
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.RestoreDefaults).clicked.connect(
+            self._reset_to_defaults
+        )
         outer.addWidget(buttons)
 
     # Path-typed settings: keys checked for existence on save (file only —
@@ -257,6 +262,43 @@ class SettingsDialog(QDialog):
 
         self.settings_changed.emit()
         self.accept()
+
+    # ------------------------------------------------------------------
+    # Reset
+    # ------------------------------------------------------------------
+
+    def _reset_to_defaults(self):
+        """Repopulate the dialog widgets from ``config._DEFAULTS``.
+
+        Nothing is written to QSettings until the user clicks OK — this is
+        a non-destructive preview so they can still Cancel out.
+        """
+        confirm = QMessageBox.question(
+            self,
+            "Reset Settings",
+            "Reset every Settings field to its default value?\n\n"
+            "Your changes won't be saved until you click OK.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        # Repopulate widgets from _DEFAULTS. Auto-detect blender/everything
+        # paths since they're left blank by default.
+        defaults = config._DEFAULTS
+        self.blender_exe.setText(
+            defaults.get("blender_exe", "") or self._auto_detect_blender()
+        )
+        self.everything_dll.setText(
+            defaults.get("everything_dll", "") or self._auto_detect_everything()
+        )
+        self.presets_path.setText(defaults.get("presets_path", ""))
+        self.cue4parse_cli.setText(defaults.get("cue4parse_cli", ""))
+        self.addon_name.setText(defaults.get("psk_addon_name", ""))
+        self.timeout.setValue(int(defaults.get("timeout_seconds", 120)))
+        self.texture_format.setCurrentText(defaults.get("export_texture_format", "png"))
+        self.audio_format.setCurrentText(defaults.get("export_audio_format", "wav"))
 
     # ------------------------------------------------------------------
     # Appearance shortcut

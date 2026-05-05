@@ -598,7 +598,7 @@ class MainWindow(QMainWindow):
         if not game_folder:
             QMessageBox.warning(
                 self, "No Game Folder",
-                "Set the game folder path in Settings first."
+                "Set the game folder under Manage Profiles first."
             )
             return
 
@@ -931,7 +931,7 @@ class MainWindow(QMainWindow):
         # set; fall back to game_folder for single-directory setups.
         game_folder = config.get("unpack_output_dir") or config.get("game_folder")
         if not game_folder:
-            QMessageBox.warning(self, "No Game Folder", "Set the game folder in Settings first.")
+            QMessageBox.warning(self, "No Game Folder", "Set the game folder under Manage Profiles first.")
             return
 
         dll_path = config.get("everything_dll") or None
@@ -1019,7 +1019,7 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.warning(
                 self, "Output Directory Not Set",
-                "Set the output directory in Settings."
+                "Set the output directory under Manage Profiles."
             )
             return
 
@@ -1164,7 +1164,7 @@ class MainWindow(QMainWindow):
     def _rescan_selected(self, entries: list):
         game_folder = config.get("game_folder")
         if not game_folder:
-            QMessageBox.warning(self, "No Game Folder", "Set the game folder in Settings first.")
+            QMessageBox.warning(self, "No Game Folder", "Set the game folder under Manage Profiles first.")
             return
 
         dll_path = config.get("everything_dll") or None
