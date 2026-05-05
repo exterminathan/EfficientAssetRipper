@@ -75,6 +75,7 @@ class UnpackerPanel(QWidget):
     props_viewed = Signal(str, str)     # (title, json_text) for Text Viewer
     audio_preview = Signal(str)         # local file path for Audio Preview tab
     tga_preview = Signal(str)           # local file path for TGA/image Preview tab
+    mesh_preview = Signal(str)          # local .psk path for Mesh Preview tab
     version_mismatch = Signal(str)      # banner text for the log viewer
 
     def __init__(self, parent=None):
@@ -84,6 +85,7 @@ class UnpackerPanel(QWidget):
         self._exporting = False
         self._export_output_dir = ""
         self._ue_version_user_set = False  # track if user manually changed the version dropdown
+        self._suppress_export_error_popup = False  # user opted to skip popups for the current CLI session
 
         # WWise audio data (populated by scan after mount)
         self._wwise_root = ""          # e.g. "Game/Content/WwiseAudio/"
@@ -115,6 +117,7 @@ class UnpackerPanel(QWidget):
         """
         was_mounted = self._mounted
         self._ue_version_user_set = False
+        self._suppress_export_error_popup = False
         self._game_dir_edit.setText(profile.get("game_dir", ""))
 
         ue = profile.get("ue_version", "GAME_UE5_4")
@@ -651,6 +654,8 @@ class UnpackerPanel(QWidget):
 
     _IMAGE_EXTS = frozenset({".tga", ".png", ".dds", ".bmp", ".jpg", ".jpeg"})
     _AUDIO_EXTS = frozenset({".wav", ".ogg", ".wem", ".bnk", ".ewem"})
+    _MESH_EXTS = frozenset({".psk", ".pskx"})
+    _PACKAGE_EXTS_FOR_MESH = (".uasset", ".upk", ".umap")
 
     def _show_context_menu(self, pos):
         item = self._tree.itemAt(pos)
@@ -682,6 +687,22 @@ class UnpackerPanel(QWidget):
             act = QAction("Preview Image", self)
             act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_image_vfs(p))
             menu.addAction(act)
+        elif suffix in self._MESH_EXTS or suffix in self._PACKAGE_EXTS_FOR_MESH:
+            # Package files often contain meshes — surface a Preview Mesh action that
+            # only enables once the user has exported. Files already on disk as .psk
+            # / .pskx work directly.
+            local_psk = self._find_local_mesh(vfs_path)
+            act = QAction("Preview Mesh", self)
+            if local_psk is None:
+                act.setEnabled(False)
+                act.setToolTip("Export this asset first to preview its mesh")
+            else:
+                act.triggered.connect(lambda checked=False, p=str(local_psk): self.mesh_preview.emit(p))
+            menu.addAction(act)
+
+            act_props = QAction("View Properties", self)
+            act_props.triggered.connect(lambda checked=False, p=vfs_path: self._preview_props_ctx(p))
+            menu.addAction(act_props)
         else:
             act = QAction("View Properties", self)
             act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_props_ctx(p))
@@ -689,6 +710,34 @@ class UnpackerPanel(QWidget):
 
         if menu.actions():
             menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _find_local_mesh(self, vfs_path: str) -> "Path | None":
+        """Locate an exported PSK/PSKX for *vfs_path* if one is on disk.
+
+        Mirrors `_find_local_file` but specifically targets the .psk → .uasset
+        extension swap CUE4Parse performs on mesh exports.
+        """
+        if not self._export_output_dir:
+            return None
+        out = Path(self._export_output_dir)
+        suffix = Path(vfs_path.lower()).suffix
+
+        if suffix in self._MESH_EXTS:
+            candidates = [out / vfs_path.lstrip("/")]
+            name = vfs_path.rsplit("/", 1)[-1]
+            candidates.append(out / name)
+        else:
+            stem_path = out / vfs_path.lstrip("/")
+            name = vfs_path.rsplit("/", 1)[-1]
+            candidates = []
+            for ext in (".psk", ".pskx"):
+                candidates.append(stem_path.with_suffix(ext))
+                candidates.append((out / name).with_suffix(ext))
+
+        for c in candidates:
+            if c.is_file():
+                return c
+        return None
 
     def _find_local_file(self, vfs_path: str) -> "Path | None":
         """Try to locate an exported VFS file on disk.
@@ -1162,6 +1211,7 @@ class UnpackerPanel(QWidget):
         if failed:
             details = "\n".join(f"  {f.get('path', '?')}: {f.get('error', '?')}" for f in failed[:20])
             self.log_message.emit(f"Failed exports:\n{details}", "error")
+            self._show_export_failure_popup(failed)
 
         # Enable hand-off if any PSKs were extracted
         if self._export_output_dir:
@@ -1260,6 +1310,42 @@ class UnpackerPanel(QWidget):
     # Error / warning / cleanup
     # ------------------------------------------------------------------
 
+    def _show_export_failure_popup(self, failed: list, *, fatal_message: str | None = None) -> None:
+        """Surface export failures as a modal so the user can't miss them.
+
+        The user can tick "Don't show again..." to silence further popups for
+        the rest of this CLI session — useful when a version mismatch produces
+        the same error across hundreds of items in one queue.
+        """
+        if self._suppress_export_error_popup:
+            return
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        if fatal_message is not None:
+            box.setWindowTitle("Export Failed")
+            box.setText("The export was halted by a fatal error.")
+            box.setInformativeText(fatal_message)
+        else:
+            n = len(failed)
+            box.setWindowTitle("Export Errors")
+            box.setText(f"{n} item{'s' if n != 1 else ''} failed to export.")
+            box.setInformativeText("Click 'Show Details' for the per-item error list.")
+            preview_n = 50
+            lines = [
+                f"{f.get('path', '?')}\n   -> {f.get('error', '?')}"
+                for f in failed[:preview_n]
+            ]
+            if n > preview_n:
+                lines.append(f"... and {n - preview_n} more.")
+            box.setDetailedText("\n\n".join(lines))
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        chk = QCheckBox("Don't show this again until the CLI is re-mounted")
+        box.setCheckBox(chk)
+        box.exec()
+        if chk.isChecked():
+            self._suppress_export_error_popup = True
+
     @Slot(str)
     def _on_warning(self, message: str):
         self.log_message.emit(f"CUE4Parse warning: {message}", "warning")
@@ -1298,11 +1384,18 @@ class UnpackerPanel(QWidget):
         self._progress.setMaximum(1)
         self._progress.setValue(0)
         self.log_message.emit(f"CUE4Parse error: {message}", "error")
+        if self._exporting:
+            self._exporting = False
+            self._export_btn.setEnabled(True)
+            self._export_folder_btn.setEnabled(True)
+            self._cancel_btn.setEnabled(False)
+            self._show_export_failure_popup([], fatal_message=message)
 
     @Slot()
     def _on_process_ended(self):
         self._exporting = False
         self._mounted = False
+        self._suppress_export_error_popup = False
         self._tree.setEnabled(False)
         self._export_btn.setEnabled(False)
         self._export_folder_btn.setEnabled(False)

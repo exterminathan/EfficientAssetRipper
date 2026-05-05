@@ -38,6 +38,7 @@ from gui.asset_browser import AssetBrowser
 from gui.blend_combiner import BlendCombinerPanel
 from gui.tga_previewer import TGAPreviewerPanel
 from gui.audio_previewer import AudioPreviewerPanel
+from gui.mesh_previewer import MeshPreviewerPanel
 from gui.log_viewer import LogViewer
 from gui.profile_bar import ProfileBar
 from gui.psk_picker import PskPickerPanel
@@ -375,6 +376,10 @@ class MainWindow(QMainWindow):
         self._audio_previewer = AudioPreviewerPanel()
         self._right_tabs.addTab(self._audio_previewer, "Audio Preview")
 
+        # Tab 6: Mesh Preview
+        self._mesh_previewer = MeshPreviewerPanel()
+        self._right_tabs.addTab(self._mesh_previewer, "Mesh Preview")
+
         right_layout.addWidget(self._right_tabs)
 
         # Main horizontal splitter
@@ -399,6 +404,8 @@ class MainWindow(QMainWindow):
         self._browser.add_to_queue_requested.connect(self._add_browser_to_queue)
         self._browser.reprocess_requested.connect(self._reprocess_asset)
         self._browser.delete_requested.connect(self._on_browser_delete)
+        self._browser.mesh_preview_requested.connect(self._on_browser_mesh_preview)
+        self._browser.props_view_requested.connect(self._on_browser_props_view)
         self._psk_picker.add_to_queue_requested.connect(self._add_picker_to_queue)
         self._unpacker_panel.psk_extracted.connect(self._on_psks_extracted)
         self._unpacker_panel.log_message.connect(self._log.append)
@@ -406,6 +413,7 @@ class MainWindow(QMainWindow):
         self._unpacker_panel.props_viewed.connect(self._show_in_text_viewer)
         self._unpacker_panel.audio_preview.connect(self._on_audio_preview)
         self._unpacker_panel.tga_preview.connect(self._on_tga_preview)
+        self._unpacker_panel.mesh_preview.connect(self._on_mesh_preview)
 
         # Give unpacker panel access to the audio previewer's temp directory
         self._unpacker_panel._audio_preview_temp_dir = self._audio_previewer.temp_dir
@@ -424,6 +432,27 @@ class MainWindow(QMainWindow):
         """Load image file in the TGA Previewer tab and switch to it."""
         self._tga_previewer.load_file(path)
         self._right_tabs.setCurrentWidget(self._tga_previewer)
+
+    def _on_mesh_preview(self, path: str):
+        """Load .psk in the Mesh Preview tab and switch to it."""
+        self._mesh_previewer.load_psk(path)
+        self._right_tabs.setCurrentWidget(self._mesh_previewer)
+
+    def _on_browser_mesh_preview(self, asset):
+        self._on_mesh_preview(str(asset.psk_path))
+
+    def _on_browser_props_view(self, asset):
+        """Open the asset's .props.txt in the Text Viewer; toast if absent."""
+        props = asset.psk_path.with_suffix(".props.txt")
+        if not props.is_file():
+            self._statusbar.showMessage(f"No .props.txt for {asset.name}", 4000)
+            return
+        try:
+            text = props.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            self._statusbar.showMessage(f"Could not read props: {e}", 5000)
+            return
+        self._show_in_text_viewer(f"Properties — {asset.name}", text)
 
     def _build_menu(self):
         from PySide6.QtGui import QAction

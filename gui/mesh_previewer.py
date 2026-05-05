@@ -1,0 +1,681 @@
+"""Embedded 3D mesh preview tab.
+
+Loads `.psk` / `.pskx` files via `core.psk_reader` and renders them in a
+`QOpenGLWidget` with an orbit camera. Three render modes are exposed in the
+toolbar: flat-lit color, UV checker grid, and wireframe.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+from PySide6.QtCore import Qt, QObject, QPoint, QRunnable, QThreadPool, Signal
+from PySide6.QtGui import QImage, QMouseEvent, QPainter, QSurfaceFormat, QWheelEvent
+from PySide6.QtOpenGL import (
+    QOpenGLBuffer,
+    QOpenGLShader,
+    QOpenGLShaderProgram,
+    QOpenGLTexture,
+    QOpenGLVertexArrayObject,
+)
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QStackedLayout,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+import gui.theme as theme
+from core.psk_reader import PskMesh, PskParseError, read_psk
+
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Background loader
+# ---------------------------------------------------------------------------
+
+class _LoadSignals(QObject):
+    loaded = Signal(int, object, str)   # token, PskMesh, name
+    failed = Signal(int, str, str)      # token, name, error
+
+
+class _LoadRunnable(QRunnable):
+    def __init__(self, token: int, path: str, signals: _LoadSignals):
+        super().__init__()
+        self._token = token
+        self._path = path
+        self._signals = signals
+
+    def run(self):
+        name = Path(self._path).name
+        try:
+            mesh = read_psk(self._path)
+        except (OSError, PskParseError, ValueError) as e:
+            self._signals.failed.emit(self._token, name, str(e))
+            return
+        self._signals.loaded.emit(self._token, mesh, name)
+
+
+# ---------------------------------------------------------------------------
+# GL shaders (GL 3.3 core)
+# ---------------------------------------------------------------------------
+
+_VERT_SHADER = """\
+#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_uv;
+uniform mat4 u_mvp;
+uniform mat4 u_model;
+out vec3 v_normal_world;
+out vec2 v_uv;
+void main() {
+    gl_Position = u_mvp * vec4(a_pos, 1.0);
+    v_normal_world = mat3(u_model) * a_normal;
+    v_uv = a_uv;
+}
+"""
+
+_FRAG_FLAT = """\
+#version 330 core
+in vec3 v_normal_world;
+in vec2 v_uv;
+uniform vec3 u_base_color;
+uniform vec3 u_light_dir;
+out vec4 frag_color;
+void main() {
+    vec3 N = normalize(v_normal_world);
+    float lambert = max(dot(N, normalize(u_light_dir)), 0.0);
+    vec3 col = u_base_color * (0.25 + 0.75 * lambert);
+    frag_color = vec4(col, 1.0);
+}
+"""
+
+_FRAG_UV = """\
+#version 330 core
+in vec3 v_normal_world;
+in vec2 v_uv;
+uniform sampler2D u_checker;
+uniform vec3 u_light_dir;
+out vec4 frag_color;
+void main() {
+    vec3 N = normalize(v_normal_world);
+    float lambert = max(dot(N, normalize(u_light_dir)), 0.0);
+    vec3 tex = texture(u_checker, v_uv).rgb;
+    frag_color = vec4(tex * (0.4 + 0.6 * lambert), 1.0);
+}
+"""
+
+_FRAG_WIRE = """\
+#version 330 core
+uniform vec3 u_wire_color;
+out vec4 frag_color;
+void main() {
+    frag_color = vec4(u_wire_color, 1.0);
+}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Math helpers (column-major mat4 layout — uniform upload format)
+# ---------------------------------------------------------------------------
+
+def _mat4_identity() -> np.ndarray:
+    return np.eye(4, dtype=np.float32)
+
+
+def _perspective(fov_y_deg: float, aspect: float, near: float, far: float) -> np.ndarray:
+    f = 1.0 / math.tan(math.radians(fov_y_deg) * 0.5)
+    m = np.zeros((4, 4), dtype=np.float32)
+    m[0, 0] = f / max(aspect, 1e-6)
+    m[1, 1] = f
+    m[2, 2] = (far + near) / (near - far)
+    m[2, 3] = (2.0 * far * near) / (near - far)
+    m[3, 2] = -1.0
+    return m
+
+
+def _look_at(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
+    f = target - eye
+    f = f / max(np.linalg.norm(f), 1e-9)
+    s = np.cross(f, up)
+    s = s / max(np.linalg.norm(s), 1e-9)
+    u = np.cross(s, f)
+    m = np.eye(4, dtype=np.float32)
+    m[0, :3] = s
+    m[1, :3] = u
+    m[2, :3] = -f
+    m[0, 3] = -np.dot(s, eye)
+    m[1, 3] = -np.dot(u, eye)
+    m[2, 3] =  np.dot(f, eye)
+    return m
+
+
+# ---------------------------------------------------------------------------
+# OpenGL viewport widget
+# ---------------------------------------------------------------------------
+
+class _MeshGLView(QOpenGLWidget):
+    """Renders a single mesh with an orbit camera."""
+
+    mode_changed = Signal(str)
+    mesh_loaded = Signal(int, int)   # vert_count, tri_count
+
+    _MODES = ("flat", "uv", "wire")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mesh: Optional[PskMesh] = None
+        self._mode: str = "flat"
+
+        # Camera state — locked target, no panning.
+        self._azimuth = 0.6      # radians
+        self._elevation = 0.4
+        self._distance = 3.0
+        self._target = np.zeros(3, dtype=np.float32)
+
+        self._last_mouse: Optional[QPoint] = None
+
+        # GL resources, populated in initializeGL.
+        self._vao: Optional[QOpenGLVertexArrayObject] = None
+        self._vbo: Optional[QOpenGLBuffer] = None
+        self._ebo: Optional[QOpenGLBuffer] = None
+        self._index_count = 0
+        self._programs: dict[str, QOpenGLShaderProgram] = {}
+        self._checker: Optional[QOpenGLTexture] = None
+
+        # Pending mesh waits for an active GL context before upload.
+        self._pending_mesh: Optional[PskMesh] = None
+
+        # Theme-pulled colors used by paintGL — refreshed once at init.
+        self._refresh_theme_colors()
+
+        # 4× MSAA gives clean wireframe + lambert silhouettes.
+        fmt = QSurfaceFormat()
+        fmt.setVersion(3, 3)
+        fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+        fmt.setDepthBufferSize(24)
+        fmt.setSamples(4)
+        self.setFormat(fmt)
+        self.setMouseTracking(False)
+
+    # ------------------------------------------------------------------
+    # Theme
+    # ------------------------------------------------------------------
+
+    def _refresh_theme_colors(self):
+        c = theme.current_scheme()
+        self._bg_color = self._hex_to_rgb(c.get("bg_dark", "#181818"))
+        self._wire_color = self._hex_to_rgb(c.get("accent", "#7AA8FF"))
+        # Matte gray for flat-lit mode — readable against most backgrounds.
+        self._flat_color = (0.62, 0.64, 0.67)
+
+    @staticmethod
+    def _hex_to_rgb(s: str) -> tuple[float, float, float]:
+        s = s.lstrip("#")
+        if len(s) == 3:
+            s = "".join(ch * 2 for ch in s)
+        try:
+            r = int(s[0:2], 16) / 255.0
+            g = int(s[2:4], 16) / 255.0
+            b = int(s[4:6], 16) / 255.0
+            return (r, g, b)
+        except (ValueError, IndexError):
+            return (0.1, 0.1, 0.1)
+
+    # ------------------------------------------------------------------
+    # Public slots
+    # ------------------------------------------------------------------
+
+    def set_mesh(self, mesh: PskMesh):
+        """Replace the rendered mesh. Safe to call before initializeGL."""
+        self._mesh = mesh
+        if mesh is not None:
+            self._target = mesh.center.copy()
+            self._distance = max(mesh.radius * 2.5, 0.5)
+            # Reset camera angles to a friendly default each load.
+            self._azimuth = 0.6
+            self._elevation = 0.4
+
+        # Stat-strip listeners (and headless tests) only care that data arrived,
+        # not whether GL has finished uploading. Emit unconditionally for non-None
+        # meshes; the actual VBO upload defers if the context isn't ready yet.
+        if mesh is not None:
+            self.mesh_loaded.emit(mesh.vert_count, mesh.tri_count)
+
+        if self.context() is None or not self.isValid():
+            self._pending_mesh = mesh
+            return
+
+        self.makeCurrent()
+        try:
+            self._upload_mesh(mesh)
+        finally:
+            self.doneCurrent()
+        self.update()
+
+    def clear(self):
+        """Drop the current mesh."""
+        self.set_mesh(PskMesh(
+            verts=np.zeros((0, 3), dtype=np.float32),
+            normals=np.zeros((0, 3), dtype=np.float32),
+            uv0=np.zeros((0, 2), dtype=np.float32),
+            faces=np.zeros((0, 3), dtype=np.uint32),
+        ))
+
+    def set_render_mode(self, mode: str):
+        if mode not in self._MODES:
+            return
+        if mode == self._mode:
+            return
+        self._mode = mode
+        self.mode_changed.emit(mode)
+        self.update()
+
+    @property
+    def render_mode(self) -> str:
+        return self._mode
+
+    def reset_view(self):
+        if self._mesh is not None:
+            self._distance = max(self._mesh.radius * 2.5, 0.5)
+            self._target = self._mesh.center.copy()
+        self._azimuth = 0.6
+        self._elevation = 0.4
+        self.update()
+
+    # ------------------------------------------------------------------
+    # GL lifecycle
+    # ------------------------------------------------------------------
+
+    def initializeGL(self):
+        from OpenGL import GL  # local import — keeps PyOpenGL out of GUI thread until needed
+
+        GL.glClearColor(*self._bg_color, 1.0)
+        GL.glEnable(GL.GL_DEPTH_TEST)
+        GL.glDepthFunc(GL.GL_LEQUAL)
+        GL.glEnable(GL.GL_CULL_FACE)
+        GL.glCullFace(GL.GL_BACK)
+
+        self._programs["flat"] = self._build_program(_VERT_SHADER, _FRAG_FLAT)
+        self._programs["uv"]   = self._build_program(_VERT_SHADER, _FRAG_UV)
+        self._programs["wire"] = self._build_program(_VERT_SHADER, _FRAG_WIRE)
+
+        self._checker = self._build_checker_texture()
+
+        self._vao = QOpenGLVertexArrayObject(self)
+        self._vao.create()
+        self._vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        self._vbo.create()
+        self._ebo = QOpenGLBuffer(QOpenGLBuffer.Type.IndexBuffer)
+        self._ebo.create()
+
+        if self._pending_mesh is not None:
+            self._upload_mesh(self._pending_mesh)
+            self._pending_mesh = None
+
+    def resizeGL(self, w: int, h: int):
+        from OpenGL import GL
+        GL.glViewport(0, 0, w, h)
+
+    def paintGL(self):
+        from OpenGL import GL
+
+        GL.glClearColor(*self._bg_color, 1.0)
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+
+        if self._index_count == 0:
+            return
+
+        # Camera position from spherical coords.
+        cx = math.cos(self._elevation) * math.sin(self._azimuth)
+        cy = math.sin(self._elevation)
+        cz = math.cos(self._elevation) * math.cos(self._azimuth)
+        eye = self._target + np.array([cx, cy, cz], dtype=np.float32) * self._distance
+
+        view = _look_at(eye, self._target, np.array([0, 1, 0], dtype=np.float32))
+        aspect = max(self.width(), 1) / max(self.height(), 1)
+        # Near/far clamped to mesh scale to keep depth precision usable.
+        radius = self._mesh.radius if self._mesh is not None else 1.0
+        near = max(self._distance * 0.01, radius * 0.001)
+        far  = max(self._distance + radius * 4.0, near * 1000.0)
+        proj = _perspective(45.0, aspect, near, far)
+
+        model = _mat4_identity()
+        mvp = proj @ view @ model
+
+        program = self._programs[self._mode]
+        program.bind()
+        # Qt expects a flat 16-float column-major buffer for setUniformValue with mat4.
+        program.setUniformValue("u_mvp", _to_qmatrix(mvp))
+        program.setUniformValue("u_model", _to_qmatrix(model))
+
+        if self._mode == "flat":
+            program.setUniformValue("u_base_color", *self._flat_color)
+            program.setUniformValue("u_light_dir", 0.4, 0.7, 0.5)
+        elif self._mode == "uv":
+            program.setUniformValue("u_light_dir", 0.4, 0.7, 0.5)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
+            self._checker.bind()
+            program.setUniformValue("u_checker", 0)
+        else:  # wire
+            program.setUniformValue("u_wire_color", *self._wire_color)
+
+        self._vao.bind()
+        if self._mode == "wire":
+            GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE)
+            GL.glLineWidth(1.2)
+            GL.glDisable(GL.GL_CULL_FACE)
+            GL.glDrawElements(GL.GL_TRIANGLES, self._index_count, GL.GL_UNSIGNED_INT, None)
+            GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
+            GL.glEnable(GL.GL_CULL_FACE)
+        else:
+            GL.glDrawElements(GL.GL_TRIANGLES, self._index_count, GL.GL_UNSIGNED_INT, None)
+        self._vao.release()
+        program.release()
+
+    # ------------------------------------------------------------------
+    # GL helpers
+    # ------------------------------------------------------------------
+
+    def _build_program(self, vert_src: str, frag_src: str) -> QOpenGLShaderProgram:
+        prog = QOpenGLShaderProgram(self)
+        if not prog.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, vert_src):
+            log.error("Vertex shader compile failed: %s", prog.log())
+        if not prog.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Fragment, frag_src):
+            log.error("Fragment shader compile failed: %s", prog.log())
+        prog.bindAttributeLocation("a_pos", 0)
+        prog.bindAttributeLocation("a_normal", 1)
+        prog.bindAttributeLocation("a_uv", 2)
+        if not prog.link():
+            log.error("Shader link failed: %s", prog.log())
+        return prog
+
+    def _build_checker_texture(self) -> QOpenGLTexture:
+        """Generate a 256×256 RGBA checker pattern in code (no asset file)."""
+        size = 256
+        cells = 8
+        cell_px = size // cells
+        # Two-tone checker with mild contrast. Dark/light cells alternate.
+        a = np.array([60, 70, 80, 255], dtype=np.uint8)
+        b = np.array([200, 205, 210, 255], dtype=np.uint8)
+        img = np.zeros((size, size, 4), dtype=np.uint8)
+        for cy in range(cells):
+            for cx in range(cells):
+                col = a if (cx + cy) % 2 == 0 else b
+                y0, y1 = cy * cell_px, (cy + 1) * cell_px
+                x0, x1 = cx * cell_px, (cx + 1) * cell_px
+                img[y0:y1, x0:x1] = col
+
+        # Tint top-left cell with a clear color marker so UV orientation reads at a glance.
+        img[0:cell_px, 0:cell_px] = np.array([220, 80, 80, 255], dtype=np.uint8)
+
+        # Wrap as a copied QImage (numpy buffer would be reclaimed otherwise).
+        qimg = QImage(img.tobytes(), size, size, size * 4, QImage.Format.Format_RGBA8888).copy()
+        tex = QOpenGLTexture(qimg, QOpenGLTexture.MipMapGeneration.GenerateMipMaps)
+        tex.setMinificationFilter(QOpenGLTexture.Filter.LinearMipMapLinear)
+        tex.setMagnificationFilter(QOpenGLTexture.Filter.Linear)
+        tex.setWrapMode(QOpenGLTexture.WrapMode.Repeat)
+        return tex
+
+    def _upload_mesh(self, mesh: Optional[PskMesh]):
+        from OpenGL import GL
+
+        if mesh is None or mesh.faces.size == 0 or mesh.verts.size == 0:
+            self._index_count = 0
+            return
+
+        # Interleave: pos(3) + normal(3) + uv(2) = 8 floats per vertex.
+        n = mesh.verts.shape[0]
+        interleaved = np.empty((n, 8), dtype=np.float32)
+        interleaved[:, 0:3] = mesh.verts
+        interleaved[:, 3:6] = mesh.normals
+        interleaved[:, 6:8] = mesh.uv0
+        vbo_data = interleaved.tobytes()
+        ebo_data = mesh.faces.astype(np.uint32, copy=False).tobytes()
+
+        self._vao.bind()
+
+        self._vbo.bind()
+        self._vbo.allocate(vbo_data, len(vbo_data))
+
+        self._ebo.bind()
+        self._ebo.allocate(ebo_data, len(ebo_data))
+
+        stride = 8 * 4  # bytes
+        # Attrib 0 — position
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, None)
+        # Attrib 1 — normal
+        GL.glEnableVertexAttribArray(1)
+        GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, _gl_offset(3 * 4))
+        # Attrib 2 — uv
+        GL.glEnableVertexAttribArray(2)
+        GL.glVertexAttribPointer(2, 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _gl_offset(6 * 4))
+
+        self._vao.release()
+        self._vbo.release()
+        # Index buffer must remain bound to the VAO; release after VAO.release().
+        self._ebo.release()
+
+        self._index_count = int(mesh.faces.size)
+
+    # ------------------------------------------------------------------
+    # Mouse / wheel — orbit + zoom only (no panning)
+    # ------------------------------------------------------------------
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_mouse = event.position().toPoint()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._last_mouse is None:
+            self._last_mouse = event.position().toPoint()
+            return
+        cur = event.position().toPoint()
+        dx = cur.x() - self._last_mouse.x()
+        dy = cur.y() - self._last_mouse.y()
+        self._last_mouse = cur
+
+        # Orbit: x → azimuth, y → elevation. Scale with viewport size for
+        # consistent feel on big or small viewports.
+        scale = 0.005
+        self._azimuth -= dx * scale
+        self._elevation += dy * scale
+        # Clamp elevation off the poles to avoid look-at degeneracy.
+        max_elev = math.radians(89.0)
+        if self._elevation > max_elev:
+            self._elevation = max_elev
+        elif self._elevation < -max_elev:
+            self._elevation = -max_elev
+        self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_mouse = None
+
+    def wheelEvent(self, event: QWheelEvent):
+        # 120 units per notch on a normal mouse wheel.
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        factor = 0.9 if delta > 0 else 1.1
+        radius = self._mesh.radius if self._mesh is not None else 1.0
+        new_dist = self._distance * factor
+        # Clamp to a sensible range relative to mesh size.
+        self._distance = float(np.clip(new_dist, radius * 0.2, radius * 50.0))
+        self.update()
+
+
+def _gl_offset(byte_offset: int):
+    """Return a ctypes-compatible offset for glVertexAttribPointer.
+
+    PyOpenGL accepts None for offset 0 and a ctypes void pointer for non-zero
+    offsets. Using `ctypes.c_void_p(byte_offset)` avoids the "expected pointer"
+    deprecation warning some PyOpenGL builds emit on raw int args.
+    """
+    import ctypes
+    return ctypes.c_void_p(byte_offset) if byte_offset else None
+
+
+def _to_qmatrix(m: np.ndarray):
+    """Convert a (4,4) numpy mat into a QMatrix4x4 for shader uniform upload."""
+    from PySide6.QtGui import QMatrix4x4
+    flat = m.astype(np.float32).flatten().tolist()
+    # numpy is row-major; QMatrix4x4 ctor takes 16 args in row-major order.
+    return QMatrix4x4(*flat)
+
+
+# ---------------------------------------------------------------------------
+# Tab widget
+# ---------------------------------------------------------------------------
+
+class MeshPreviewerPanel(QWidget):
+    """Right-tab panel for previewing PSK / PSKX meshes."""
+
+    log_message = Signal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._current_path: str = ""
+        self._load_token = 0
+        self._load_signals = _LoadSignals()
+        self._load_signals.loaded.connect(self._on_load_done)
+        self._load_signals.failed.connect(self._on_load_failed)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ── Toolbar ────────────────────────────────────────────────────
+        toolbar = QToolBar()
+        toolbar.setMovable(False)
+
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+
+        def _add_mode_button(label: str, mode: str, checked: bool = False) -> QPushButton:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setChecked(checked)
+            btn.clicked.connect(lambda _=False, m=mode: self._gl.set_render_mode(m))
+            self._mode_group.addButton(btn)
+            toolbar.addWidget(btn)
+            return btn
+
+        self._btn_flat = _add_mode_button("Flat", "flat", checked=True)
+        self._btn_uv   = _add_mode_button("UV Grid", "uv")
+        self._btn_wire = _add_mode_button("Wireframe", "wire")
+
+        toolbar.addSeparator()
+        self._btn_reset = QPushButton("Reset View")
+        self._btn_reset.clicked.connect(lambda: self._gl.reset_view())
+        toolbar.addWidget(self._btn_reset)
+
+        layout.addWidget(toolbar)
+
+        # ── Stacked content: empty placeholder vs GL viewport ─────────
+        self._stack_host = QWidget()
+        self._stack = QStackedLayout(self._stack_host)
+        self._stack.setContentsMargins(0, 0, 0, 0)
+
+        self._placeholder = QLabel(
+            "Right-click a mesh row in the Asset Browser → Preview Mesh\n"
+            "(or right-click an exported .uasset in the Unpacker)"
+        )
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        self._stack.addWidget(self._placeholder)
+
+        self._gl = _MeshGLView(self)
+        self._gl.mode_changed.connect(self._on_mode_changed)
+        self._gl.mesh_loaded.connect(self._on_mesh_loaded)
+        self._stack.addWidget(self._gl)
+
+        self._stack.setCurrentWidget(self._placeholder)
+        layout.addWidget(self._stack_host, stretch=1)
+
+        # ── Status strip ───────────────────────────────────────────────
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(8, 4, 8, 4)
+        self._status_name = QLabel("")
+        status_row.addWidget(self._status_name, 1)
+        self._status_stats = QLabel("")
+        status_row.addWidget(self._status_stats, 0)
+        status_host = QWidget()
+        status_host.setLayout(status_row)
+        layout.addWidget(status_host)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def load_psk(self, path: str | Path):
+        """Parse and display a PSK / PSKX file. Heavy work runs on a thread."""
+        path_str = str(path)
+        self._current_path = path_str
+        name = Path(path_str).name
+
+        if not Path(path_str).is_file():
+            self._status_name.setText(f"Not found: {name}")
+            self._status_stats.setText("")
+            self._stack.setCurrentWidget(self._placeholder)
+            self._placeholder.setText(f"File not found:\n{path_str}")
+            return
+
+        self._load_token += 1
+        token = self._load_token
+        self._status_name.setText(f"Loading: {name}…")
+        self._status_stats.setText("")
+
+        runnable = _LoadRunnable(token, path_str, self._load_signals)
+        QThreadPool.globalInstance().start(runnable)
+
+    def clear(self):
+        self._gl.clear()
+        self._status_name.setText("")
+        self._status_stats.setText("")
+        self._stack.setCurrentWidget(self._placeholder)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _on_load_done(self, token: int, mesh: object, name: str):
+        if token != self._load_token:
+            return
+        if not isinstance(mesh, PskMesh):
+            self._on_load_failed(token, name, "loader returned non-mesh")
+            return
+        self._gl.set_mesh(mesh)
+        self._stack.setCurrentWidget(self._gl)
+        self._status_name.setText(name)
+
+    def _on_load_failed(self, token: int, name: str, error: str):
+        if token != self._load_token:
+            return
+        self._status_name.setText(f"Failed: {name}")
+        self._status_stats.setText(error)
+        self._stack.setCurrentWidget(self._placeholder)
+        self._placeholder.setText(f"Failed to load {name}\n{error}")
+        self.log_message.emit(f"Mesh preview error: {error}", "error")
+
+    def _on_mode_changed(self, mode: str):
+        self._btn_flat.setChecked(mode == "flat")
+        self._btn_uv.setChecked(mode == "uv")
+        self._btn_wire.setChecked(mode == "wire")
+
+    def _on_mesh_loaded(self, vert_count: int, tri_count: int):
+        self._status_stats.setText(f"{vert_count:,} verts · {tri_count:,} tris")

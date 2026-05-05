@@ -225,6 +225,8 @@ class AssetBrowser(QWidget):
     add_to_queue_requested = Signal(list)  # list[AssetEntry] to queue
     reprocess_requested = Signal(object)  # single AssetEntry to reprocess
     delete_requested = Signal(list)  # list[AssetEntry] to remove from cache
+    mesh_preview_requested = Signal(object)   # AssetEntry — open in Mesh Preview tab
+    props_view_requested = Signal(object)     # AssetEntry — open .props.txt in Text Viewer
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -305,6 +307,7 @@ class AssetBrowser(QWidget):
         self._tree.setAlternatingRowColors(True)
         self._tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tree.doubleClicked.connect(self._on_double_click)
+        self._tree.itemClicked.connect(self._on_item_clicked)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self._tree)
@@ -500,11 +503,40 @@ class AssetBrowser(QWidget):
         asset = self._assets[idx]
         menu = QMenu(self)
 
+        act_mesh = QAction("Preview Mesh", self)
+        act_mesh.setEnabled(asset.psk_path.is_file())
+        if not act_mesh.isEnabled():
+            act_mesh.setToolTip("PSK file is missing on disk")
+        act_mesh.triggered.connect(lambda: self.mesh_preview_requested.emit(asset))
+        menu.addAction(act_mesh)
+
+        act_props = QAction("Preview Properties", self)
+        props_path = asset.psk_path.with_suffix(".props.txt")
+        act_props.setEnabled(props_path.is_file())
+        if not act_props.isEnabled():
+            act_props.setToolTip("No .props.txt next to this PSK")
+        act_props.triggered.connect(lambda: self.props_view_requested.emit(asset))
+        menu.addAction(act_props)
+
+        menu.addSeparator()
+
         act_delete = QAction("Remove from list / cache", self)
         act_delete.triggered.connect(lambda: self._delete_assets([asset]))
         menu.addAction(act_delete)
 
         menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
+        """Left-click on a leaf row → open its .props.txt in the Text Viewer.
+
+        Category / subcategory rows have no entry in `_item_to_idx` and are
+        ignored. Clicking the checkbox column is unchanged — Qt routes that
+        through the item's own check-state machinery, which we don't intercept.
+        """
+        idx = self._item_to_idx.get(id(item))
+        if idx is None:
+            return
+        self.props_view_requested.emit(self._assets[idx])
 
     def _delete_assets(self, assets: list[AssetEntry]):
         to_remove = {str(a.psk_path) for a in assets}
