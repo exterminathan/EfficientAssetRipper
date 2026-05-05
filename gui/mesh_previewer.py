@@ -480,7 +480,11 @@ class _MeshGLView(QOpenGLWidget):
         self._vao.bind()
         if self._mode == "wire":
             GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE)
-            GL.glLineWidth(1.2)
+            # Don't call glLineWidth — values other than 1.0 raise
+            # GL_INVALID_VALUE on GL 3.3 core profile drivers that don't
+            # support wide lines, which trips the gl_failed latch and leaves
+            # the wireframe blank. 1.0 is the default and is universally
+            # supported, so just rely on it.
             GL.glDrawElements(GL.GL_TRIANGLES, self._index_count, GL.GL_UNSIGNED_INT, None)
             # Polygon mode is reset at the top of the next frame — no need
             # to reset here. Resetting mid-frame after a draw was the path
@@ -595,15 +599,19 @@ class _MeshGLView(QOpenGLWidget):
         dy = cur.y() - self._last_mouse.y()
         self._last_mouse = cur
 
-        # Quaternion-based orbit: full 360° in any direction, no gimbal lock.
-        # X-drag = yaw around the world up axis (pre-multiply, world space).
-        # Y-drag = pitch around the camera's local right axis (post-multiply,
-        # local space) so up/down feels consistent regardless of orientation.
+        # Trackball orbit: both axes are screen-relative (rotations applied in
+        # the camera's local frame). Drag-X spins around the screen vertical
+        # (= camera local Y), drag-Y spins around the screen horizontal (=
+        # camera local X). This is invariant to the model's up-axis convention
+        # — Z-up Unreal meshes, Y-up FBX, weird per-game flips all orbit the
+        # same way. World-Y "turntable" orbit fails on Z-up models because
+        # world Y is sideways relative to the model's true vertical, which is
+        # exactly what was reported as "rotates over some weird sideways axis".
         scale = 0.005
         yaw_q = _quat_axis_angle((0.0, 1.0, 0.0), -dx * scale)
         pitch_q = _quat_axis_angle((1.0, 0.0, 0.0), -dy * scale)
         self._orientation = _quat_normalize(
-            _quat_mul(yaw_q, _quat_mul(self._orientation, pitch_q))
+            _quat_mul(self._orientation, _quat_mul(yaw_q, pitch_q))
         )
         self.update()
 
