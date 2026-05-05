@@ -254,13 +254,21 @@ def tmp_profiles_dir(tmp_path: Path, monkeypatch) -> Path:
 def mock_blender_run(monkeypatch):
     """Patch `core.blender_runner.run_blender` to return a canned result.
 
-    Yields the recorded-call list; tests can append BlenderResult instances
-    to `responses` to control consecutive return values.
+    Yields a dict with:
+      - ``calls``: list of recorded call kwargs
+      - ``responses``: append :class:`BlenderResult` instances to control
+        consecutive return values; the default is a generic success.
+      - ``write_dummy_blend_on_success``: when True (default False), write a
+        tiny placeholder file at ``manifest['output_path']`` whenever the
+        canned result reports success. Used by the synthetic e2e pipeline
+        test so downstream "blend exists?" checks pass without spawning
+        Blender.
     """
     from core.blender_runner import BlenderResult
 
     calls: list[dict] = []
     responses: list[BlenderResult] = []
+    state: dict = {"write_dummy_blend_on_success": False}
 
     def _stub(
         blender_exe,
@@ -281,15 +289,31 @@ def mock_blender_run(monkeypatch):
             }
         )
         if responses:
-            return responses.pop(0)
-        return BlenderResult(
-            success=True,
-            asset_name=manifest.get("psk_path", ""),
-            materials_processed=len(manifest.get("materials", {})),
-            return_code=0,
-            stdout="",
-            stderr="",
-        )
+            result = responses.pop(0)
+        else:
+            result = BlenderResult(
+                success=True,
+                asset_name=manifest.get("psk_path", ""),
+                materials_processed=len(manifest.get("materials", {})),
+                return_code=0,
+                stdout="",
+                stderr="",
+            )
+
+        if result.success and state["write_dummy_blend_on_success"]:
+            out = manifest.get("output_path")
+            if out:
+                out_path = Path(out)
+                try:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Real .blend files start with "BLENDER" — using the
+                    # same magic keeps anything that sniffs the header happy
+                    # without needing the full container format.
+                    out_path.write_bytes(b"BLENDER-test-stub\n")
+                except OSError:
+                    pass
+
+        return result
 
     import core.blender_runner as br
     monkeypatch.setattr(br, "run_blender", _stub)
@@ -297,7 +321,11 @@ def mock_blender_run(monkeypatch):
     import core.job_manager as jm
     monkeypatch.setattr(jm, "run_blender", _stub)
 
-    return {"calls": calls, "responses": responses}
+    return {
+        "calls": calls,
+        "responses": responses,
+        "write_dummy_blend_on_success": state,
+    }
 
 
 # ---------------------------------------------------------------------------
