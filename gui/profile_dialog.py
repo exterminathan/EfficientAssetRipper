@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.profile_manager import ProfileManager
+from core.profile_manager import ProfileLoadError, ProfileManager
 from gui.widgets import CollapsibleSection, PathPicker
 
 log = logging.getLogger(__name__)
@@ -189,6 +189,14 @@ class ProfileDialog(QDialog):
                 self._cache[name] = self._manager.load_profile(name)
             except FileNotFoundError:
                 # Profile vanished underneath us; re-list and bail
+                self._refresh_list()
+                return
+            except ProfileLoadError as e:
+                log.error("Failed to load profile '%s' in dialog: %s", name, e)
+                QMessageBox.critical(
+                    self, "Profile load failed",
+                    f"Could not read profile '{name}'.\n\n{e}",
+                )
                 self._refresh_list()
                 return
 

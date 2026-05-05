@@ -33,7 +33,7 @@ from core.asset_scanner import (
 )
 from core.everything import EverythingError, get_sdk, reset_sdk
 from core.job_manager import JobManager
-from core.profile_manager import ProfileManager
+from core.profile_manager import ProfileLoadError, ProfileManager
 from gui.asset_browser import AssetBrowser
 from gui.blend_combiner import BlendCombinerPanel
 from gui.tga_previewer import TGAPreviewerPanel
@@ -739,6 +739,13 @@ class MainWindow(QMainWindow):
             data = self._profile_manager.load_profile(name)
         except FileNotFoundError:
             data = {}
+        except ProfileLoadError as e:
+            # Refuse to silently overwrite a profile we couldn't read — that
+            # would clobber the user's data with whatever the panels have in
+            # memory. Surface the error and bail.
+            log.error("Cannot save profile '%s': %s", name, e)
+            self._log.append(f"Cannot save profile '{name}': {e}", "error")
+            return
 
         # Always merge picker state (psk_processed) — that's a record of work
         # done, not a path the user is editing.
@@ -826,6 +833,16 @@ class MainWindow(QMainWindow):
             data = self._profile_manager.load_profile(name)
         except FileNotFoundError:
             self._log.append(f"Profile '{name}' not found", "warning")
+            return
+        except ProfileLoadError as e:
+            log.error("Failed to load profile '%s': %s", name, e)
+            QMessageBox.critical(
+                self, "Profile load failed",
+                f"Could not read profile '{name}'.\n\n{e}\n\n"
+                "Close any program that may be holding the file open, "
+                "or open the profiles folder to inspect it manually.",
+            )
+            self._log.append(f"Failed to load profile '{name}': {e}", "error")
             return
 
         self._current_profile_name = name

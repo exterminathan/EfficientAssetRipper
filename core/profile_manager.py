@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 from _base import base_dir
@@ -12,6 +13,16 @@ from _base import base_dir
 log = logging.getLogger(__name__)
 
 _PROFILES_DIR = base_dir() / "profiles"
+
+
+class ProfileLoadError(Exception):
+    """Raised when a profile file exists but cannot be loaded.
+
+    Distinct from ``FileNotFoundError`` (handled by callers as "create a new
+    one") and from corrupt-JSON recovery (which the loader handles silently
+    by backing up the bad file and returning empty defaults). This is for the
+    cases the user must act on — file locked, permission denied, OS error.
+    """
 
 # Characters not allowed in profile (file) names on Windows
 _INVALID_CHARS = re.compile(r'[\\/:*?"<>|]')
@@ -120,15 +131,64 @@ class ProfileManager:
         return sorted(names)
 
     def load_profile(self, name: str) -> dict:
-        """Load a profile by name.  Returns a dict (empty-profile defaults for missing keys)."""
+        """Load a profile by name. Returns a dict with default values filled in.
+
+        Failure modes:
+
+        - ``FileNotFoundError`` if the profile JSON does not exist.
+        - ``ProfileLoadError`` if the file exists but the OS refuses to read
+          it (locked, permission denied). The caller should surface this.
+        - **Corrupt JSON is recovered silently:** the bad file is renamed to
+          ``<name>.json.corrupt-<unix_ts>`` so the user can inspect/recover
+          it manually, and an empty-defaults profile is returned. This keeps
+          the GUI usable when a single profile gets mangled.
+        """
         path = _safe_path(name)
         if not path.is_file():
             raise FileNotFoundError(f"Profile not found: {name}")
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Ensure all expected keys exist — and that types match the defaults.
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except PermissionError as e:
+            raise ProfileLoadError(
+                f"Permission denied reading profile '{name}': {e}"
+            ) from e
+        except OSError as e:
+            raise ProfileLoadError(
+                f"OS error reading profile '{name}': {e}"
+            ) from e
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            backup = self._quarantine_corrupt(path, raw, reason=f"JSONDecodeError: {e}")
+            log.error(
+                "Profile '%s' has invalid JSON (%s); quarantined to %s, "
+                "returning empty defaults.", name, e, backup.name,
+            )
+            data = {}
+
+        # Top-level must be an object; anything else (list, scalar, null) is
+        # corrupt by our schema. Quarantine and recover the same way.
+        if not isinstance(data, dict):
+            backup = self._quarantine_corrupt(
+                path, raw, reason=f"top-level was {type(data).__name__}, expected object"
+            )
+            log.error(
+                "Profile '%s' has wrong shape (got %s, expected object); "
+                "quarantined to %s, returning empty defaults.",
+                name, type(data).__name__, backup.name,
+            )
+            data = {}
+
+        # Fill missing keys from defaults; type-check collection keys.
+        defaulted: list[str] = []
         for k, v in _EMPTY_PROFILE.items():
-            data.setdefault(k, v)
+            if k not in data:
+                data[k] = v
+                defaulted.append(k)
+                continue
             # Reject obviously corrupt/malicious values for collection keys.
             if k == "aes_keys" and not isinstance(data[k], list):
                 log.warning("profile %s: aes_keys is %s, resetting to []", name, type(data[k]).__name__)
@@ -139,8 +199,34 @@ class ProfileManager:
                 data[k] = {}
             elif k == "auto_save_paths" and not isinstance(data[k], bool):
                 data[k] = bool(data[k])
+        if defaulted:
+            log.info("profile %s: filled defaults for %s", name, ", ".join(defaulted))
+
         data["name"] = name.strip()
         return data
+
+    @staticmethod
+    def _quarantine_corrupt(path: Path, raw: str, *, reason: str) -> Path:
+        """Move a corrupt profile aside so the GUI can keep running.
+
+        Writes the original bytes to ``<stem>.json.corrupt-<unix_ts>`` next to
+        the original. If the rename fails (e.g. parent directory disappeared),
+        falls back to writing a sibling file with the same suffix.
+        """
+        ts = int(time.time())
+        backup = path.with_name(f"{path.stem}.json.corrupt-{ts}")
+        try:
+            path.replace(backup)
+        except OSError:
+            # If we can't rename, at least save the raw bytes nearby so the
+            # user has *something* to recover from.
+            try:
+                backup.write_text(raw, encoding="utf-8")
+            except OSError:
+                log.exception(
+                    "Failed to quarantine corrupt profile %s (%s)", path, reason,
+                )
+        return backup
 
     def save_profile(self, name: str, data: dict) -> None:
         """Write *data* to ``profiles/<name>.json``."""
