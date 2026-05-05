@@ -14,7 +14,7 @@ from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import Qt, QObject, QPoint, QRunnable, QThreadPool, Signal
-from PySide6.QtGui import QImage, QMouseEvent, QPainter, QSurfaceFormat, QWheelEvent
+from PySide6.QtGui import QImage, QMouseEvent, QPainter, QSurfaceFormat, QVector3D, QWheelEvent
 from PySide6.QtOpenGL import (
     QOpenGLBuffer,
     QOpenGLShader,
@@ -197,6 +197,10 @@ class _MeshGLView(QOpenGLWidget):
         # Pending mesh waits for an active GL context before upload.
         self._pending_mesh: Optional[PskMesh] = None
 
+        # Latches on first GL error so a broken driver / shader doesn't spam
+        # the crash reporter on every repaint.
+        self._gl_failed: bool = False
+
         # Theme-pulled colors used by paintGL — refreshed once at init.
         self._refresh_theme_colors()
 
@@ -240,6 +244,8 @@ class _MeshGLView(QOpenGLWidget):
     def set_mesh(self, mesh: PskMesh):
         """Replace the rendered mesh. Safe to call before initializeGL."""
         self._mesh = mesh
+        # New mesh = fresh chance for GL to succeed.
+        self._gl_failed = False
         if mesh is not None:
             self._target = mesh.center.copy()
             self._distance = max(mesh.radius * 2.5, 0.5)
@@ -279,6 +285,9 @@ class _MeshGLView(QOpenGLWidget):
         if mode == self._mode:
             return
         self._mode = mode
+        # Give the new shader a clean shot — the previous mode may have
+        # latched the failure flag.
+        self._gl_failed = False
         self.mode_changed.emit(mode)
         self.update()
 
@@ -331,6 +340,29 @@ class _MeshGLView(QOpenGLWidget):
     def paintGL(self):
         from OpenGL import GL
 
+        # Once GL has failed, just clear and return — never let the per-frame
+        # exception reach the global crash handler again.
+        if self._gl_failed:
+            try:
+                GL.glClearColor(*self._bg_color, 1.0)
+                GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+            except Exception:
+                pass
+            return
+
+        try:
+            self._render_frame(GL)
+        except Exception as e:
+            # Latch on first failure so subsequent repaints don't keep firing.
+            self._gl_failed = True
+            log.error("Mesh preview disabled — GL error: %s", e)
+            try:
+                GL.glClearColor(*self._bg_color, 1.0)
+                GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+            except Exception:
+                pass
+
+    def _render_frame(self, GL):
         GL.glClearColor(*self._bg_color, 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
 
@@ -356,20 +388,28 @@ class _MeshGLView(QOpenGLWidget):
 
         program = self._programs[self._mode]
         program.bind()
-        # Qt expects a flat 16-float column-major buffer for setUniformValue with mat4.
         program.setUniformValue("u_mvp", _to_qmatrix(mvp))
         program.setUniformValue("u_model", _to_qmatrix(model))
 
+        # PySide6's setUniformValue overload resolution doesn't reliably pick
+        # glUniform1i for sampler bindings or vec3 setters from raw Python
+        # floats. Use QVector3D for vec3 uniforms and a direct glUniform1i call
+        # for the sampler — that's what triggered the GL_INVALID_OPERATION on
+        # UV-grid mode in the wild.
+        light_dir = QVector3D(0.4, 0.7, 0.5)
+
         if self._mode == "flat":
-            program.setUniformValue("u_base_color", *self._flat_color)
-            program.setUniformValue("u_light_dir", 0.4, 0.7, 0.5)
+            program.setUniformValue("u_base_color", QVector3D(*self._flat_color))
+            program.setUniformValue("u_light_dir", light_dir)
         elif self._mode == "uv":
-            program.setUniformValue("u_light_dir", 0.4, 0.7, 0.5)
+            program.setUniformValue("u_light_dir", light_dir)
             GL.glActiveTexture(GL.GL_TEXTURE0)
             self._checker.bind()
-            program.setUniformValue("u_checker", 0)
+            loc = program.uniformLocation("u_checker")
+            if loc >= 0:
+                GL.glUniform1i(loc, 0)
         else:  # wire
-            program.setUniformValue("u_wire_color", *self._wire_color)
+            program.setUniformValue("u_wire_color", QVector3D(*self._wire_color))
 
         self._vao.bind()
         if self._mode == "wire":
