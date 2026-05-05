@@ -7,8 +7,9 @@ non-trivial changes.
 
 ## What this is
 
-A PySide6 desktop app (Windows-first) that turns Unreal Engine 5 game files
-into ready-to-use Blender `.blend` scenes. Pipeline:
+A PySide6 desktop app (Windows-first) that unpacks UE4/5 game files and
+exports them to Blender, plus utility tools for previewing textures,
+combining models, and other useful features. Asset-export pipeline:
 **Unpack** (`.pak`/`.utoc` → loose files) → **Scan** (find PSK/PSKX) →
 **Resolve** (parse `.props.txt` for materials/textures) →
 **Process** (headless Blender wires PBR shader graphs and saves `.blend`).

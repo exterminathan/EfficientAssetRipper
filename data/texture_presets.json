@@ -8,7 +8,7 @@
 
   "presets": {
     "default_pbr": {
-      "description": "Standard PBR with packed ORM/RMA maps. Handles most UE5 assets.",
+      "description": "Standard PBR with packed ORM/RMA maps. Handles most UE4/5 assets.",
       "priority_order": [
         "base_color",
         "alb",

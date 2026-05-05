@@ -1,7 +1,7 @@
 [project]
 name = "efficient-asset-ripper"
 version = "0.5.0"
-description = "Pipeline for turning Unreal Engine 5 game files into ready-to-use Blender .blend scenes."
+description = "Unpack any UE4/5 game files and easily export them to Blender. Includes utility tools for previewing textures, combining models, and other useful features."
 requires-python = ">=3.11,<3.13"
 
 [tool.pytest.ini_options]

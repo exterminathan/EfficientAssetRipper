@@ -493,7 +493,9 @@ class MainWindow(QMainWindow):
             self,
             "About EfficientAssetRipper",
             f"<h3>EfficientAssetRipper v{__version__}</h3>"
-            "<p>UE5 → Blender asset assembler.</p>"
+            "<p>Unpack any UE4/5 game files and easily export them to "
+            "Blender. Includes utility tools for previewing textures, "
+            "combining models, and other useful features.</p>"
             "<p>Released under the MIT License.</p>"
             f"{update_html}"
             '<p><a href="https://github.com/exterminathan/EfficientAssetRipper">'

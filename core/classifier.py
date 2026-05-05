@@ -1,6 +1,6 @@
 """Classify PSK/PSKX assets into categories based on their folder path.
 
-Works with any UE5-exported game folder. Uses the top-level and secondary
+Works with any UE4/5-exported game folder. Uses the top-level and secondary
 folder segments to assign a human-readable category and subcategory.
 """
 

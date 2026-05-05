@@ -49,7 +49,7 @@ VSVersionInfo(
           u'040904B0',
           [
             StringStruct(u'CompanyName', u'EfficientAssetRipper'),
-            StringStruct(u'FileDescription', u'EfficientAssetRipper - UE5 to Blender asset assembler'),
+            StringStruct(u'FileDescription', u'EfficientAssetRipper - Unpack UE4/5 game files and export to Blender'),
             StringStruct(u'FileVersion', u'{ver_str}'),
             StringStruct(u'InternalName', u'EfficientAssetRipper'),
             StringStruct(u'LegalCopyright', u'MIT License'),

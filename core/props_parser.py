@@ -1,4 +1,4 @@
-"""Parsers for UE5 exported .props.txt files (mesh and material)."""
+"""Parsers for UE4/5 exported .props.txt files (mesh and material)."""
 
 from __future__ import annotations
 

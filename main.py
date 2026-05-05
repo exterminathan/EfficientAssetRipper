@@ -1,4 +1,4 @@
-"""EfficientAssetRipper — UE5 Asset Assembler entry point."""
+"""EfficientAssetRipper — Unpack UE4/5 game files and export to Blender."""
 
 import sys
 import logging

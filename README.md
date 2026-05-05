@@ -6,14 +6,14 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![Built with PySide6 + .NET 8](https://img.shields.io/badge/built%20with-PySide6%20%2B%20.NET%208-512bd4)](#dependencies)
 
-> **From `.pak` to `.blend` in three clicks.** A Windows desktop app that
-> turns Unreal Engine 5 game files into ready-to-use Blender scenes with
-> fully wired PBR materials.
+> Unpack any UE4/5 game files and easily export them to Blender. Includes
+> utility tools for previewing textures, combining models, and other
+> useful features.
 
 <!-- Demo GIF — record locally with ScreenToGif/LICEcap, drop in docs/demo.gif -->
 ![EfficientAssetRipper demo](docs/demo.gif)
 
-**Scan → Resolve → Process → Done.** Point it at a game folder, and EfficientAssetRipper finds meshes, resolves their materials and textures, then batch-processes everything in Blender — importing PSK/PSKX meshes, wiring PBR shader nodes, and saving ready-to-use `.blend` files.
+**Unpack → Scan → Resolve → Process → Done.** Mount `.pak` / `.utoc` archives, point it at a game folder, and EfficientAssetRipper finds meshes, resolves their materials and textures, then batch-processes everything in Blender — importing PSK/PSKX meshes, wiring PBR shader nodes, and saving ready-to-use `.blend` files. Plus utility tools for previewing textures, combining models, and more.
 
 ---
 

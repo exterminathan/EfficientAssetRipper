@@ -101,9 +101,10 @@ class _WelcomePage(QWizardPage):
         layout = QVBoxLayout(self)
 
         intro = QLabel(
-            "EfficientAssetRipper turns Unreal Engine 5 game files into "
-            "ready-to-use Blender scenes — meshes imported, PBR materials "
-            "wired, .blend files saved.\n\n"
+            "EfficientAssetRipper unpacks any UE4/5 game files and easily "
+            "exports them to Blender. It also includes utility tools for "
+            "previewing textures, combining models, and other useful "
+            "features.\n\n"
             "This wizard will:\n"
             "  • Detect the tools it needs (Blender, Everything, .NET runtime)\n"
             "  • Help you pick a game folder and output directory\n\n"
