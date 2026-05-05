@@ -11,6 +11,22 @@ def qapp_args():
     return ["EAR-tests"]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_queue_checkpoint(tmp_path, monkeypatch):
+    """Redirect ``core.queue_checkpoint`` to ``tmp_path`` for every Qt test.
+
+    JobManager writes a checkpoint after every job, so without isolation a
+    test that exercises the runner would scribble on the real
+    ``cache/queue_checkpoint.json`` and bleed state across runs.
+    """
+    from core import queue_checkpoint
+    monkeypatch.setattr(
+        queue_checkpoint,
+        "_DEFAULT_PATH",
+        tmp_path / "queue_checkpoint.json",
+    )
+
+
 @pytest.fixture
 def stubbed_main_window(qtbot, mock_qsettings, mock_blender_run, monkeypatch):
     """Construct MainWindow with all external SDKs / subprocess stubbed.

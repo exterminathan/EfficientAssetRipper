@@ -210,6 +210,9 @@ class MainWindow(QMainWindow):
         # Defer the setup wizard until after splash → window handoff so the
         # modal dialog doesn't fight the splash for focus.
         QTimer.singleShot(0, self._maybe_run_setup_wizard)
+        # Same deferral for the resume prompt — keeps focus order sane and
+        # gives the wizard precedence on first launch.
+        QTimer.singleShot(0, self._maybe_prompt_resume)
 
         # Best-effort startup housekeeping. Old scan-cache backups left behind
         # by version-bump renames pile up otherwise.
@@ -696,6 +699,56 @@ class MainWindow(QMainWindow):
         self._profile_bar.refresh(select=target)
         self._load_profile(target)
 
+    def _maybe_prompt_resume(self):
+        """If a queue checkpoint exists for the current profile, ask to resume.
+
+        Mismatched profiles leave the checkpoint untouched — the user can
+        switch to that profile and the prompt will fire next launch. A
+        broken / older-version checkpoint is silently dropped via
+        ``queue_checkpoint.load`` returning None (the file stays so the
+        user can investigate manually).
+        """
+        from core import queue_checkpoint
+        if not queue_checkpoint.exists():
+            return
+        payload = queue_checkpoint.load()
+        if payload is None:
+            return
+        if payload.profile and payload.profile != self._current_profile_name:
+            log.info(
+                "Skipping resume prompt: checkpoint is for profile %r, current is %r",
+                payload.profile, self._current_profile_name,
+            )
+            return
+
+        remaining = payload.remaining
+        if not remaining:
+            # Nothing left to do — checkpoint is stale, drop it.
+            queue_checkpoint.delete()
+            return
+
+        reply = QMessageBox.question(
+            self, "Resume previous batch?",
+            f"A previous batch was interrupted with {len(remaining)} asset(s) "
+            f"still pending (profile: {payload.profile or 'unknown'}).\n\n"
+            "Resume processing now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            queue_checkpoint.delete()
+            return
+
+        # Add the remaining assets to the queue and kick off processing.
+        # The JobManager will be constructed with already_completed so its
+        # checkpoint writes continue from where we left off.
+        self._queue.add_to_queue(remaining)
+        self._resume_completed = list(payload.completed)
+        self._log.append(
+            f"Resuming previous batch ({len(remaining)} pending)", "info"
+        )
+        self._process_queue()
+
     def _is_busy(self) -> bool:
         """Return True if any background operation is running."""
         if any(w.isRunning() for w in self._active_workers):
@@ -1042,7 +1095,12 @@ class MainWindow(QMainWindow):
             addon_name=addon_name,
             timeout=timeout,
             parent=self,
+            profile_name=self._current_profile_name,
+            already_completed=getattr(self, "_resume_completed", None),
         )
+        # The completed-paths carry-over only applies to the very next batch;
+        # subsequent runs start fresh.
+        self._resume_completed = None
 
         # Connect signals
         self._job_manager.job_started.connect(self._queue.on_job_started)

@@ -20,6 +20,7 @@ from _base import base_dir
 from core.asset_scanner import AssetEntry
 from core.blender_runner import BlenderResult, run_blender
 from core.log_redaction import redact_sensitive
+from core import queue_checkpoint
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,9 @@ class JobManager(QThread):
         addon_name: str,
         timeout: int = 120,
         parent=None,
+        *,
+        profile_name: str = "",
+        already_completed: Optional[list[str]] = None,
     ):
         super().__init__(parent)
         self._assets = list(assets)
@@ -56,6 +60,11 @@ class JobManager(QThread):
         self._timeout = timeout
         self._cancelled = False
         self._results: list[BlenderResult] = []
+        # Profile name + already-completed psk_path list go into the queue
+        # checkpoint so a resumed batch picks up where the previous run
+        # left off without losing identity.
+        self._profile_name = profile_name
+        self._completed_paths: list[str] = list(already_completed or [])
         # Tracks the currently-running Blender subprocess so cancel() can
         # terminate it directly instead of letting the timeout run out.
         self._active_proc: Optional[subprocess.Popen] = None
@@ -93,6 +102,10 @@ class JobManager(QThread):
         self.log_message.emit(
             f"Starting batch: {total} assets → {self._output_dir}", "info"
         )
+
+        # Initial checkpoint write — gives us a recovery anchor even if the
+        # very first asset crashes Blender hard.
+        self._write_checkpoint()
 
         for idx, asset in enumerate(self._assets):
             if self._cancelled:
@@ -176,6 +189,21 @@ class JobManager(QThread):
             # Write to log file
             self._write_log_entry(log_path, idx, total, asset, result)
 
+            # Record in checkpoint regardless of success/failure — a resumed
+            # batch should pick up at the next un-touched asset, not retry
+            # something that already produced a (possibly broken) output.
+            self._completed_paths.append(str(asset.psk_path))
+            self._write_checkpoint()
+
+        # Clean exit (not cancelled) drops the checkpoint so it doesn't
+        # haunt the next launch. A cancelled batch leaves it in place so
+        # the user can resume from where they stopped.
+        if not self._cancelled:
+            try:
+                queue_checkpoint.delete()
+            except Exception:
+                log.exception("Failed to delete queue checkpoint after clean finish")
+
         self.log_message.emit(
             f"Batch complete: {succeeded} succeeded, {failed} failed, "
             f"{total - succeeded - failed} cancelled",
@@ -183,6 +211,18 @@ class JobManager(QThread):
         )
         self.log_message.emit(f"Log saved: {log_path}", "info")
         self.queue_finished.emit(total, succeeded, failed)
+
+    def _write_checkpoint(self) -> None:
+        """Persist current pending + completed lists. Best-effort: a failed
+        write logs and continues so the batch isn't stalled by a bad disk."""
+        try:
+            queue_checkpoint.save(
+                profile=self._profile_name,
+                pending=self._assets,
+                completed=self._completed_paths,
+            )
+        except Exception:
+            log.exception("Failed to write queue checkpoint")
 
     def _write_log_entry(
         self,
