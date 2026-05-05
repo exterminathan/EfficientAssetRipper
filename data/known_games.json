@@ -1,0 +1,5 @@
+{
+  "$schema_version": 1,
+  "$comment": "Disabled by default. Set use_known_games_map=true in config to use as fallback when exe FileVersion is missing/unreadable.",
+  "games": []
+}

@@ -82,6 +82,7 @@ class UnpackerPanel(QWidget):
         self._mounted = False
         self._exporting = False
         self._export_output_dir = ""
+        self._ue_version_user_set = False  # track if user manually changed the version dropdown
 
         # WWise audio data (populated by scan after mount)
         self._wwise_root = ""          # e.g. "Game/Content/WwiseAudio/"
@@ -105,9 +106,11 @@ class UnpackerPanel(QWidget):
 
     def load_from_profile(self, profile: dict) -> None:
         """Populate UI fields from a profile dict (does NOT auto-mount)."""
+        self._ue_version_user_set = False
         self._game_dir_edit.setText(profile.get("game_dir", ""))
 
         ue = profile.get("ue_version", "GAME_UE5_4")
+        self._ue_version_combo.blockSignals(True)
         idx = self._ue_version_combo.findText(ue)
         if idx >= 0:
             self._ue_version_combo.setCurrentIndex(idx)
@@ -115,6 +118,7 @@ class UnpackerPanel(QWidget):
             # Unknown version (e.g. a game-specific EGame enum value not in our list)
             self._ue_version_combo.addItem(ue)
             self._ue_version_combo.setCurrentText(ue)
+        self._ue_version_combo.blockSignals(False)
 
         self._mappings_edit.setText(profile.get("mappings_path", ""))
         self._output_dir_edit.setText(profile.get("unpack_output_dir", ""))
@@ -383,8 +387,11 @@ class UnpackerPanel(QWidget):
         self._unpacker.wwise_scan_result.connect(self._on_wwise_scan_result)
         self._unpacker.warning.connect(self._on_warning)
         self._unpacker.version_warning.connect(self._on_version_warning)
+        self._unpacker.version_detected.connect(self._on_version_detected)
         self._unpacker.error.connect(self._on_error)
         self._unpacker.process_ended.connect(self._on_process_ended)
+        self._ue_version_combo.currentTextChanged.connect(self._on_ue_version_changed)
+        self._ue_version_combo.editTextChanged.connect(self._on_ue_version_changed)
 
     # ------------------------------------------------------------------
     # Tree filtering (in-place hide/show for lazy-loaded VFS)
@@ -1216,6 +1223,9 @@ class UnpackerPanel(QWidget):
         path = QFileDialog.getExistingDirectory(self, "Select Game Content Folder", start)
         if path:
             self._game_dir_edit.setText(path)
+            self._ue_version_user_set = False
+            if self._unpacker.is_running:
+                self._unpacker.detect_ue_version(path)
 
     def _browse_output_dir(self):
         start = self._output_dir_edit.text().strip()
@@ -1248,6 +1258,22 @@ class UnpackerPanel(QWidget):
             f"{message}"
         )
         self.version_mismatch.emit(banner)
+
+    @Slot(str, str, str)
+    def _on_version_detected(self, suggested: str, source_exe: str, file_version: str):
+        if suggested:
+            # Auto-detected a version
+            if not self._ue_version_user_set:
+                self._ue_version_combo.setCurrentText(suggested)
+            log_msg = f"Auto-detected UE version: {suggested} (from {source_exe}, FileVersion {file_version})"
+        else:
+            # Detection failed
+            log_msg = f"UE version detection failed: {file_version}"
+        self.log_message.emit(log_msg, "info")
+
+    @Slot()
+    def _on_ue_version_changed(self):
+        self._ue_version_user_set = True
 
     @Slot(str)
     def _on_error(self, message: str):

@@ -33,6 +33,7 @@ class UnpackerProcess(QObject):
     wwise_scan_result = Signal(dict)          # full scan result dict
     warning = Signal(str)                     # warning message
     version_warning = Signal(str, str)        # (message, current_ue_version) — likely UE-version mismatch
+    version_detected = Signal(str, str, str)  # (suggested_version, source_exe, file_version) or (None, None, reason)
     error = Signal(str)                       # error message
     process_ready = Signal()                  # CLI process started OK
     process_ended = Signal()                  # CLI process died / quit
@@ -116,6 +117,10 @@ class UnpackerProcess(QObject):
     def browse(self, vfs_path: str = "/") -> None:
         """Request directory listing at *vfs_path*."""
         self._send({"cmd": "browse", "path": vfs_path})
+
+    def detect_ue_version(self, game_dir: str) -> None:
+        """Auto-detect UE version from game .exe FileVersionInfo."""
+        self._send({"cmd": "detect_ue_version", "game_dir": game_dir})
 
     def export(self, asset_paths: list[str], output_dir: str,
                formats: Optional[dict[str, bool]] = None,
@@ -285,6 +290,13 @@ class UnpackerProcess(QObject):
             self.version_warning.emit(
                 msg.get("message", ""),
                 msg.get("current_version", ""),
+            )
+
+        elif msg_type == "version_detected":
+            self.version_detected.emit(
+                msg.get("suggested") or "",
+                msg.get("source_exe") or "",
+                msg.get("file_version") or msg.get("reason") or "",
             )
 
         elif msg_type == "error":

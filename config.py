@@ -32,6 +32,7 @@ _DEFAULTS = {
     "active_profile": "Default",
     "color_scheme": "Dusk",
     "custom_schemes": "{}",
+    "use_known_games_map": False,
     "setup_complete": "",
 }
 

@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.IO.Compression;
@@ -66,6 +67,9 @@ internal static class Program
     {
         "Read size is bigger than remaining archive length",
         "Read size is smaller than zero",
+        "Invalid FString length",
+        "Invalid compression flags",
+        "unable to read FString",
     };
     private const int VersionMismatchHintThreshold = 3;
 
@@ -297,6 +301,9 @@ internal static class Program
                         break;
                     case "browse":
                         HandleBrowse(cmd);
+                        break;
+                    case "detect_ue_version":
+                        HandleDetectUeVersion(cmd);
                         break;
                     case "export":
                         await RunExportWithCancelSupport(reader, () => HandleExport(cmd));
@@ -678,6 +685,148 @@ internal static class Program
             loose_file_count = _looseFiles.Count,
             keys_submitted = keysSubmitted
         });
+    }
+
+    // ─── Detect UE Version ───────────────────────────────────────────
+    private static void HandleDetectUeVersion(JObject cmd)
+    {
+        var gameDir = cmd.Value<string>("game_dir") ?? throw new ArgumentException("game_dir required");
+        var detected = DetectUeVersionFromExe(gameDir);
+
+        if (detected != null)
+        {
+            Respond(new
+            {
+                type = "version_detected",
+                suggested = detected.SuggestedVersion,
+                source_exe = detected.SourceExe,
+                file_version = detected.FileVersion
+            });
+        }
+        else
+        {
+            Respond(new
+            {
+                type = "version_detected",
+                suggested = (string?)null,
+                reason = "No executable with detectable version found"
+            });
+        }
+    }
+
+    private class VersionDetectionResult
+    {
+        public string SuggestedVersion { get; set; } = "";
+        public string SourceExe { get; set; } = "";
+        public string FileVersion { get; set; } = "";
+    }
+
+    /// <summary>
+    /// Detect UE version from exe FileVersionInfo. Walks game_dir and one parent up
+    /// for *-Win64-Shipping.exe, falling back to [GameName].exe and CrashReportClient.exe.
+    /// Returns null if no suitable exe found or version parsing fails.
+    /// </summary>
+    private static VersionDetectionResult? DetectUeVersionFromExe(string gameDir)
+    {
+        var dirInfo = new DirectoryInfo(gameDir);
+        if (!dirInfo.Exists) return null;
+
+        // Collect candidate directories: game dir + parent
+        var candidateDirs = new[] { dirInfo, dirInfo.Parent }.Where(d => d != null).ToArray();
+
+        // Ordered exe patterns
+        var exePatterns = new[]
+        {
+            new Regex(@".*-Win64-Shipping\.exe$", RegexOptions.IgnoreCase),
+            new Regex(@".*\.exe$", RegexOptions.IgnoreCase),
+        };
+        var fallbackNames = new[] { "CrashReportClient.exe" };
+
+        foreach (var dir in candidateDirs)
+        {
+            if (dir == null || !dir.Exists) continue;
+
+            try
+            {
+                var files = dir.GetFiles("*.exe", SearchOption.TopDirectoryOnly);
+
+                // Try ordered patterns first
+                foreach (var pattern in exePatterns)
+                {
+                    var match = files.FirstOrDefault(f => pattern.IsMatch(f.Name));
+                    if (match != null)
+                    {
+                        var result = TryExtractVersionFromExe(match.FullName);
+                        if (result != null) return result;
+                    }
+                }
+
+                // Try fallback names
+                foreach (var name in fallbackNames)
+                {
+                    var match = files.FirstOrDefault(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    if (match != null)
+                    {
+                        var result = TryExtractVersionFromExe(match.FullName);
+                        if (result != null) return result;
+                    }
+                }
+            }
+            catch { /* skip on any error */ }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Extract and map FileVersionInfo to EGame string. Returns null if parsing fails.
+    /// Maps "4.12" → "GAME_UE4_12", clamps out-of-range minors to nearest supported.
+    /// </summary>
+    private static VersionDetectionResult? TryExtractVersionFromExe(string exePath)
+    {
+        try
+        {
+            var info = FileVersionInfo.GetVersionInfo(exePath);
+            if (string.IsNullOrEmpty(info.FileVersion)) return null;
+
+            // Parse "4.12.5.0" → 4, 12
+            var parts = info.FileVersion.Split('.');
+            if (parts.Length < 2) return null;
+            if (!int.TryParse(parts[0], out var major)) return null;
+            if (!int.TryParse(parts[1], out var minor)) return null;
+
+            var suggested = MapVersionToEGame(major, minor);
+            if (suggested == null) return null;
+
+            return new VersionDetectionResult
+            {
+                SuggestedVersion = suggested,
+                SourceExe = Path.GetFileName(exePath),
+                FileVersion = $"{major}.{minor}.{(parts.Length > 2 ? parts[2] : "0")}.{(parts.Length > 3 ? parts[3] : "0")}"
+            };
+        }
+        catch { /* parsing failed */ return null; }
+    }
+
+    /// <summary>
+    /// Map Major.Minor to EGame string. Clamps minors to supported range.
+    /// UE4: 11-27, UE5: 0-latest (currently 5.4)
+    /// </summary>
+    private static string? MapVersionToEGame(int major, int minor)
+    {
+        if (major == 4)
+        {
+            // Clamp UE4 minor to 11-27
+            minor = Math.Max(11, Math.Min(27, minor));
+            return $"GAME_UE4_{minor}";
+        }
+        else if (major == 5)
+        {
+            // Clamp UE5 minor to 0-4 (current max)
+            minor = Math.Max(0, Math.Min(4, minor));
+            return $"GAME_UE5_{minor}";
+        }
+        return null;
     }
 
     // ─── Browse ───────────────────────────────────────────────────────
