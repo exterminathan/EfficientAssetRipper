@@ -127,6 +127,15 @@ def main():
     from core.log_redaction import install_global_redactor
     install_global_redactor()
 
+    # Catch otherwise-uncaught exceptions and Qt fatal messages, write a
+    # report under logs/, and offer the user a one-click bug filing path.
+    # Must come AFTER install_global_redactor so report contents share the
+    # same redaction filter as ordinary log lines.
+    from core import crash_reporter
+    crash_reporter.install(
+        active_profile_provider=lambda: config.get("active_profile") or "",
+    )
+
     # Windows: give this process its own identity so the taskbar shows
     # our icon instead of the generic Python interpreter icon.
     if sys.platform == "win32":
@@ -180,7 +189,15 @@ def main():
     else:
         window.show()
 
-    sys.exit(app.exec())
+    try:
+        rc = app.exec()
+    except Exception:
+        # The crash reporter's excepthook already wrote a report and showed
+        # the dialog before this re-raise reaches us. We just have to make
+        # sure we exit non-zero so launchers / CI know something went wrong.
+        logging.getLogger(__name__).exception("Fatal error in main event loop")
+        rc = 1
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

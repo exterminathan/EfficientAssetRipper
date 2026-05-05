@@ -360,6 +360,16 @@ def run_blender(
     except FileNotFoundError:
         result.error_message = f"Blender executable not found: {blender_exe}"
         log.error(result.error_message)
+        # Treat "Blender exe missing" as a fatal user-actionable problem,
+        # not a per-asset failure — the same exe is missing for every job.
+        try:
+            from core import crash_reporter
+            if crash_reporter.is_installed():
+                crash_reporter.report_subprocess_crash(
+                    "Blender", result.error_message, show_dialog=False,
+                )
+        except Exception:
+            log.exception("crash_reporter.report_subprocess_crash failed")
     except Exception as e:
         result.error_message = f"Unexpected error: {e}"
         log.error(result.error_message, exc_info=True)

@@ -67,7 +67,17 @@ class UnpackerProcess(QObject):
         self._proc.start()
 
         if not self._proc.waitForStarted(5000):
-            self.error.emit("Failed to start CUE4ParseCLI process")
+            msg = "Failed to start CUE4ParseCLI process"
+            self.error.emit(msg)
+            try:
+                from core import crash_reporter
+                if crash_reporter.is_installed():
+                    crash_reporter.report_subprocess_crash(
+                        "CUE4ParseCLI", f"{msg} (path: {cli_path})",
+                        show_dialog=False,
+                    )
+            except Exception:
+                log.exception("crash_reporter.report_subprocess_crash failed")
             return False
 
         self._buffer = ""
