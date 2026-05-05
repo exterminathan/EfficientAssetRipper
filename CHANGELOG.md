@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-05-05
+
+Resilience and UX pass on top of v0.8.0. Full notes:
+[docs/architecture.md](docs/architecture.md),
+[docs/troubleshooting.md](docs/troubleshooting.md).
+
+### Added
+- Queue checkpoint + startup resume prompt for interrupted batches.
+- Crash reporter writes redacted JSON under `logs/` with a one-click
+  "Open GitHub issue" path.
+- Color Scheme dialog: live preview toggle and Reset to Default.
+- Settings dialog: Restore Defaults button.
+- Synthetic end-to-end pipeline test in CI (no external binaries).
+
+### Changed
+- Defensive profile loading — corrupt JSON is quarantined to
+  `<name>.json.corrupt-<ts>` and the GUI keeps running.
+- "Set the game folder in Settings" prompts now point at Manage Profiles.
+- Architecture / troubleshooting / release notes moved into `docs/`.
+
+### Fixed
+- Theme-aware alert banner and swatch borders pick contrast from the
+  active scheme instead of hardcoded values.
+- Long asset paths in the detail dialog wrap and are selectable.
+- Several minor cleanups: dead `_terminate_then_kill` removed, duplicate
+  `QGroupBox` import dropped, hot-loop status-color lookup hoisted.
+
 ## [0.8.0] - 2026-05-04
 
 Pre-1.0 hardening release. Sweeping security, reliability, and UX pass across
@@ -167,6 +194,7 @@ Initial public beta release.
   `requires_dotnet_cli` e2e markers.
 - **MIT License** and legal disclaimer for asset extraction usage.
 
-[Unreleased]: https://github.com/exterminathan/EfficientAssetRipper/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/exterminathan/EfficientAssetRipper/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.5
 [0.8.0]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.0
 [0.5.0]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.5.0
