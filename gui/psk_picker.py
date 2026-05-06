@@ -13,8 +13,8 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QAction, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTreeWidget,
@@ -69,6 +70,7 @@ class PskPickerPanel(QWidget):
     """Tree-based PSK/PSKX file picker grouped by category/subcategory."""
 
     add_to_queue_requested = Signal(list)  # list[Path] – raw PSK paths
+    mesh_preview_requested = Signal(str)   # absolute .psk/.pskx path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -182,6 +184,8 @@ class PskPickerPanel(QWidget):
         )
         self._tree.setAlternatingRowColors(True)
         self._tree.itemChanged.connect(self._on_item_changed)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self._tree)
 
         # --- Status ---
@@ -438,6 +442,39 @@ class PskPickerPanel(QWidget):
     def _update_sel_count(self):
         n = len(self._checked_paths)
         self._sel_count.setText(f"{n} selected" if n else "")
+
+    def _show_context_menu(self, pos):
+        item = self._tree.itemAt(pos)
+        if item is None:
+            return
+        self._popup_context_menu(item, self._tree.viewport().mapToGlobal(pos))
+
+    def _popup_context_menu(self, item: QTreeWidgetItem, global_pos):
+        """Build and show the right-click menu for *item*. Split out from
+        `_show_context_menu` so tests can drive it directly without poking
+        the QTreeWidget's internal hit-testing."""
+        idx = self._item_to_idx.get(id(item))
+        if idx is None:
+            return  # category / subcategory header — no PSK to act on
+        psk_path = self._all_paths[idx]
+
+        menu = QMenu(self)
+
+        act_preview = QAction("Preview Mesh", self)
+        act_preview.triggered.connect(
+            lambda checked=False, p=psk_path: self.mesh_preview_requested.emit(str(p))
+        )
+        menu.addAction(act_preview)
+
+        act_reveal = QAction("Open containing folder", self)
+        act_reveal.triggered.connect(
+            lambda checked=False, p=psk_path: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(p.parent))
+            )
+        )
+        menu.addAction(act_reveal)
+
+        menu.exec(global_pos)
 
     def _walk_leaves(self, parent: QTreeWidgetItem, out: list[int]):
         for i in range(parent.childCount()):

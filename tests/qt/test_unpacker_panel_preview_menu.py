@@ -134,7 +134,7 @@ def test_on_export_done_dispatches_mesh_kind(qtbot, tmp_path: Path):
     psk = tmp_path / "Game" / "Foo.psk"
     psk.parent.mkdir(parents=True, exist_ok=True)
     psk.write_bytes(b"")
-    p._pending_temp_preview = (str(psk), "mesh")
+    p._pending_temp_preview = (str(psk), "mesh", "/Game/Foo.uasset")
     p._exporting = True
 
     with qtbot.waitSignal(p.mesh_preview, timeout=2000) as blocker:
@@ -151,7 +151,7 @@ def test_on_export_done_dispatches_texture_kind(qtbot, tmp_path: Path):
     png = tmp_path / "Game" / "Foo.png"
     png.parent.mkdir(parents=True, exist_ok=True)
     png.write_bytes(b"")
-    p._pending_temp_preview = (str(png), "texture")
+    p._pending_temp_preview = (str(png), "texture", "/Game/Foo.uasset")
     p._exporting = True
 
     with qtbot.waitSignal(p.tga_preview, timeout=2000) as blocker:
@@ -166,7 +166,7 @@ def test_on_export_done_dispatches_audio_kind(qtbot, tmp_path: Path):
     wav = tmp_path / "Game" / "Foo.wav"
     wav.parent.mkdir(parents=True, exist_ok=True)
     wav.write_bytes(b"")
-    p._pending_temp_preview = (str(wav), "audio")
+    p._pending_temp_preview = (str(wav), "audio", "/Game/Foo.uasset")
     p._exporting = True
 
     with qtbot.waitSignal(p.audio_preview, timeout=2000) as blocker:
@@ -184,7 +184,7 @@ def test_on_export_done_extension_swap_fallback(qtbot, tmp_path: Path):
     actual.parent.mkdir(parents=True, exist_ok=True)
     actual.write_bytes(b"")
     predicted = tmp_path / "Game" / "Foo.png"  # never created
-    p._pending_temp_preview = (str(predicted), "texture")
+    p._pending_temp_preview = (str(predicted), "texture", "/Game/Foo.uasset")
     p._exporting = True
 
     with qtbot.waitSignal(p.tga_preview, timeout=2000) as blocker:
@@ -222,9 +222,10 @@ def test_kick_temp_export_builds_correct_formats_dict(qtbot, tmp_path: Path, mon
         "animation": False, "audio": False,
     }
     assert p._pending_temp_preview is not None
-    expected_path, kind = p._pending_temp_preview
+    expected_path, kind, vfs_path = p._pending_temp_preview
     assert kind == "mesh"
     assert Path(expected_path).suffix == ".psk"
+    assert vfs_path == "/Game/Bar.uasset"
 
 
 def test_kick_temp_export_refuses_when_not_mounted(qtbot):
@@ -314,3 +315,85 @@ def test_menu_skipped_for_folders(qtbot):
     item = _make_row(p, "/Game/Folder", is_folder=True)
     actions = _capture_menu_actions(p, item)
     assert actions == []
+
+
+# ---------------------------------------------------------------------------
+# Expanded .uasset menu — filter buttons by child types
+# ---------------------------------------------------------------------------
+
+def _make_package_with_children(panel: UnpackerPanel, vfs_path: str,
+                                 child_export_types: list[str]) -> QTreeWidgetItem:
+    """Build a .uasset package item with real children carrying export_type.
+    Mirrors how `_on_exports_listed` populates the tree post-list_exports."""
+    parent = _make_row(panel, vfs_path)
+    for et in child_export_types:
+        child = QTreeWidgetItem(parent)
+        child.setData(0, Qt.ItemDataRole.UserRole, vfs_path)
+        child.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+        child.setData(0, Qt.ItemDataRole.UserRole + 4, et)
+    return parent
+
+
+def test_menu_for_expanded_uasset_filters_by_mesh_child(qtbot):
+    """An expanded mesh .uasset (StaticMesh + Material children) should offer
+    only Preview Mesh — not Texture/Audio."""
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_package_with_children(
+        p, "/Game/SM_Splitter_01.uasset",
+        ["StaticMesh", "Material"],  # Material is non-previewable
+    )
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Mesh", "Preview Properties"]
+
+
+def test_menu_for_expanded_uasset_filters_by_texture_child(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_package_with_children(
+        p, "/Game/TX_Conveyor_AO.uasset", ["Texture2D"],
+    )
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Texture", "Preview Properties"]
+
+
+def test_menu_for_expanded_uasset_no_previewable_children(qtbot):
+    """A .uasset whose children are all non-previewable types still shows
+    Preview Properties only — no inert preview buttons."""
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_package_with_children(
+        p, "/Game/MI_Foo.uasset", ["Material", "MaterialInstanceConstant"],
+    )
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Properties"]
+
+
+# ---------------------------------------------------------------------------
+# _on_export_done — flat-layout rescue (regression for "file not found" bug)
+# ---------------------------------------------------------------------------
+
+def test_on_export_done_finds_mesh_via_flat_rescue(qtbot, tmp_path: Path):
+    """The CLI writes mesh exports flat (e.g. <temp>/MyMesh.psk) but
+    `_predict_temp_output` builds a nested VFS-mirrored path and `succeeded`
+    echoes the VFS input path, not the disk output. The rescan fallback via
+    `_find_in_temp` should still locate the file on the *first* attempt."""
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    p._mesh_preview_temp_dir = tmp_path
+
+    # Predicted (nested) path — doesn't exist on disk.
+    predicted = tmp_path / "Game" / "Meshes" / "MyMesh.psk"
+    # Actual (flat) path the CLI wrote.
+    actual = tmp_path / "MyMesh.psk"
+    actual.write_bytes(b"")
+
+    p._pending_temp_preview = (str(predicted), "mesh", "/Game/Meshes/MyMesh.uasset")
+    p._exporting = True
+
+    # `succeeded` contains the VFS input path, not the disk output — exactly
+    # what the CLI returns today and the source of the original bug.
+    with qtbot.waitSignal(p.mesh_preview, timeout=2000) as blocker:
+        p._on_export_done(["/Game/Meshes/MyMesh.uasset"], [])
+    assert blocker.args[0] == str(actual)
+    assert p._status_label.text() == "Ready"

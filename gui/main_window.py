@@ -407,6 +407,7 @@ class MainWindow(QMainWindow):
         self._browser.mesh_preview_requested.connect(self._on_browser_mesh_preview)
         self._browser.props_view_requested.connect(self._on_browser_props_view)
         self._psk_picker.add_to_queue_requested.connect(self._add_picker_to_queue)
+        self._psk_picker.mesh_preview_requested.connect(self._on_mesh_preview)
         self._unpacker_panel.psk_extracted.connect(self._on_psks_extracted)
         self._unpacker_panel.log_message.connect(self._log.append)
         self._unpacker_panel.version_mismatch.connect(self._log.show_alert)

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-05-05
+
+Mesh preview tab plus type-aware right-click previews across the Unpacker
+and PSK Picker.
+
+### Added
+- 3D Mesh Preview tab — full 360° orbit, see-through wireframe, fast load.
+- Right-click "Preview Mesh / Texture / Audio / Properties" in the Unpacker;
+  unexpanded `.uasset` rows offer all kinds, expanded rows show only the
+  preview buttons matching their contained types.
+- Right-click "Preview Mesh" + "Open containing folder" in the PSK Picker.
+- Auto-detect UE version from the game executable's `FileVersionInfo`.
+
+### Changed
+- More descriptive preview-failure status — "This asset has no <kind> data
+  to preview" instead of "file exported but file not found".
+- Optional dependencies cleanup and minor UI polish.
+
+### Fixed
+- First mesh preview no longer fails with a stale "file not found" — the
+  resolver rescans the temp dir for both flat and nested CLI layouts.
+- Mesh previewer: UV-grid crash and wireframe leak between loads.
+- Build script clears stale .NET artifacts before publishing CUE4ParseCLI.
+
 ## [0.8.5] - 2026-05-05
 
 Resilience and UX pass on top of v0.8.0. Full notes:
@@ -194,7 +218,8 @@ Initial public beta release.
   `requires_dotnet_cli` e2e markers.
 - **MIT License** and legal disclaimer for asset extraction usage.
 
-[Unreleased]: https://github.com/exterminathan/EfficientAssetRipper/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/exterminathan/EfficientAssetRipper/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.6
 [0.8.5]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.5
 [0.8.0]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.0
 [0.5.0]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.5.0

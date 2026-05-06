@@ -99,7 +99,7 @@ class UnpackerPanel(QWidget):
         # Pending temp-export-for-preview state. Tuple is (expected_path, kind)
         # where kind ∈ {"audio", "mesh", "texture"} so _on_export_done can
         # dispatch to the right preview signal once the file lands on disk.
-        self._pending_temp_preview: "tuple[str, str] | None" = None
+        self._pending_temp_preview: "tuple[str, str, str] | None" = None
 
         self._build_ui()
         self._connect_signals()
@@ -757,12 +757,33 @@ class UnpackerPanel(QWidget):
         elif kind == "audio":
             _add_audio()
         elif kind == "package":
-            # Unexpanded .uasset/.upk/.umap — we don't know what's inside
-            # without a list_exports round-trip, so offer all three preview
-            # kinds and let the temp-export figure it out.
-            _add_mesh()
-            _add_texture()
-            _add_audio()
+            # If the package has been expanded, its children carry export_type
+            # data. Show only the preview buttons matching what's actually
+            # inside. If unexpanded (only the placeholder child exists), we
+            # don't know yet — fall back to offering all three and let the
+            # temp-export sort it out.
+            is_unexpanded = (
+                item.childCount() == 0
+                or (
+                    item.childCount() == 1
+                    and item.child(0).data(0, Qt.ItemDataRole.UserRole) == _PLACEHOLDER
+                )
+            )
+            if is_unexpanded:
+                _add_mesh()
+                _add_texture()
+                _add_audio()
+            else:
+                child_kinds = {
+                    self._classify_row(item.child(i))
+                    for i in range(item.childCount())
+                }
+                if "mesh" in child_kinds:
+                    _add_mesh()
+                if "texture" in child_kinds:
+                    _add_texture()
+                if "audio" in child_kinds:
+                    _add_audio()
 
         # Properties always available — the CLI's get_props returns inline
         # JSON regardless of asset type, so this never has to disable.
@@ -910,7 +931,7 @@ class UnpackerPanel(QWidget):
         formats[kind] = True
 
         expected = self._predict_temp_output(Path(temp_dir), vfs_path, kind)
-        self._pending_temp_preview = (str(expected), kind)
+        self._pending_temp_preview = (str(expected), kind, vfs_path)
 
         name = vfs_path.rsplit("/", 1)[-1] or vfs_path
         self._status_label.setText(f"Exporting for preview: {name}")
@@ -1097,7 +1118,7 @@ class UnpackerPanel(QWidget):
             "target_folder": full_folder,
         }
         expected = self._audio_preview_temp_dir / full_folder / f"{audio_data['debug_name']}.{audio_format}"
-        self._pending_temp_preview = (str(expected), "audio")
+        self._pending_temp_preview = (str(expected), "audio", audio_data["wem_vfs_path"])
 
         self._status_label.setText(f"Exporting for preview: {audio_data['debug_name']}")
         self._begin_export()
@@ -1310,7 +1331,7 @@ class UnpackerPanel(QWidget):
 
         # Handle temp-export-for-preview (audio / mesh / texture)
         if self._pending_temp_preview:
-            expected, kind = self._pending_temp_preview
+            expected, kind, vfs_path = self._pending_temp_preview
             self._pending_temp_preview = None
             self._exporting = False
             self._export_btn.setEnabled(True)
@@ -1341,13 +1362,23 @@ class UnpackerPanel(QWidget):
                     if cand.is_file():
                         resolved = cand
 
+            # Final fallback: the CLI writes flat (basename only) but
+            # `succeeded` echoes the VFS input path, not the disk output.
+            # Rescan the temp dir for any candidate matching this vfs_path.
+            if resolved is None:
+                temp_dir = self._temp_dir_for_kind(kind)
+                if temp_dir is not None:
+                    resolved = self._find_in_temp(Path(temp_dir), vfs_path, kind)
+
             if resolved is not None and signal_for_kind is not None:
                 self._status_label.setText("Ready")
                 signal_for_kind.emit(str(resolved))
             elif signal_for_kind is None:
                 self._status_label.setText(f"Preview kind {kind!r} has no signal")
             else:
-                self._status_label.setText("Preview export completed but file not found")
+                self._status_label.setText(
+                    f"This asset has no {kind} data to preview"
+                )
             return
 
         self._exporting = False
