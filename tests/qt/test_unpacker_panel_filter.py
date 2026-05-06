@@ -225,23 +225,6 @@ def test_category_filter_uses_cache_for_unexpanded_packages(qtbot):
 
 
 # ---------------------------------------------------------------------------
-# type_contains
-# ---------------------------------------------------------------------------
-
-def test_type_contains_substring_filter(qtbot):
-    p = _new_panel(qtbot)
-    folder = _make_folder(p._tree.invisibleRootItem(), "/G", "G")
-    anim = _make_export(folder, "/G/A.uasset", "Walk", "AnimSequence")
-    mesh = _make_export(folder, "/G/M.uasset", "Hero", "SkeletalMesh")
-
-    p._type_contains.setText("anim")
-    p._filter_tree()
-
-    assert not anim.isHidden()
-    assert mesh.isHidden()
-
-
-# ---------------------------------------------------------------------------
 # Combined axes
 # ---------------------------------------------------------------------------
 

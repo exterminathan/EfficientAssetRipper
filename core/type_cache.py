@@ -30,7 +30,7 @@ _DEFAULT_CACHE_DIR = _base_dir() / "cache"
 
 MESH_EXPORT_TYPES = frozenset({"SkeletalMesh", "StaticMesh"})
 TEXTURE_EXPORT_TYPES = frozenset({"Texture2D", "TextureCube", "Texture2DArray"})
-AUDIO_EXPORT_TYPES = frozenset({"SoundCue", "SoundWave", "AkAudioEvent"})
+AUDIO_EXPORT_TYPES = frozenset({"SoundWave"})
 MATERIAL_EXPORT_TYPES = frozenset({
     "Material", "MaterialInstance", "MaterialInstanceConstant", "MaterialInterface",
 })

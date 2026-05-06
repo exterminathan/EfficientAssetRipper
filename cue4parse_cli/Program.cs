@@ -1170,6 +1170,12 @@ internal static class Program
             }
         }
 
+        if (!exported && exports.Count > 0)
+        {
+            var typeList = string.Join(", ", exports.Select(o => o.ExportType).Distinct());
+            Respond(new { type = "warning", message = $"{Path.GetFileName(gamePath)}: loaded {exports.Count} object(s) [{typeList}] but none were exportable — check if these types need special handling" });
+        }
+
         return exported;
     }
 

@@ -9,6 +9,7 @@ import pytest
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import QMenu, QTreeWidgetItem
 
+from core.type_cache import TypeCache
 from gui.unpacker_panel import UnpackerPanel
 
 pytestmark = pytest.mark.qt
@@ -76,11 +77,16 @@ def test_classify_row_export_type_texture(qtbot):
 
 
 def test_classify_row_export_type_audio(qtbot):
+    """Only SoundWave is previewable as audio. SoundCue is composite and
+    AkAudioEvent is Wwise metadata — both fall through to "unknown" so the
+    menu offers Preview Properties only."""
     p = UnpackerPanel()
     qtbot.addWidget(p)
-    for et in ("SoundCue", "SoundWave", "AkAudioEvent"):
+    item = _make_row(p, "/Game/Foo.uasset", export_type="SoundWave")
+    assert p._classify_row(item) == "audio"
+    for et in ("SoundCue", "AkAudioEvent"):
         item = _make_row(p, "/Game/Foo.uasset", export_type=et)
-        assert p._classify_row(item) == "audio"
+        assert p._classify_row(item) == "unknown", f"{et} should not be previewable"
 
 
 def test_classify_row_unknown_export_type(qtbot):
@@ -111,8 +117,9 @@ def test_classify_row_extension_fallbacks(qtbot):
         ("/Game/M.pskx", "mesh"),
         ("/Game/A.wav", "audio"),
         ("/Game/A.wem", "audio"),
-        # Unexpanded packages classify as "package" — the menu offers all
-        # three preview kinds for them since we don't know the contents.
+        # Unexpanded packages classify as "package"; the context menu then
+        # consults the type cache (when populated) to decide which preview
+        # kinds to offer — see the menu tests below.
         ("/Game/X.uasset", "package"),
         ("/Game/X.upk", "package"),
         ("/Game/X.umap", "package"),
@@ -247,13 +254,73 @@ def test_kick_temp_export_refuses_when_not_mounted(qtbot):
 # ---------------------------------------------------------------------------
 
 def test_menu_for_unexpanded_uasset_offers_all_preview_kinds(qtbot):
-    """An unexpanded .uasset could be a mesh, texture, or audio asset; the
-    menu must offer all three so the user doesn't have to expand first."""
+    """An unexpanded .uasset with no type cache could be anything; the menu
+    must offer all three preview kinds so the user doesn't have to expand
+    first. (Cached cases are exercised below.)"""
     p = UnpackerPanel()
     qtbot.addWidget(p)
     item = _make_row(p, "/Game/Foo.uasset")
     actions = _capture_menu_actions(p, item)
     assert actions == ["Preview Mesh", "Preview Texture", "Preview Audio", "Preview Properties"]
+
+
+def _populate_type_cache(panel: UnpackerPanel, vfs_path: str, export_type: str) -> None:
+    panel._type_cache = TypeCache()
+    panel._type_cache.add_batch([{
+        "path": vfs_path,
+        "exports": [{"name": "X", "export_type": export_type}],
+    }])
+
+
+def test_menu_for_unexpanded_uasset_uses_type_cache_mesh_only(qtbot):
+    """When the type cache knows the package is mesh-only, the unexpanded
+    menu drops Texture/Audio."""
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    _populate_type_cache(p, "/Game/Foo.uasset", "SkeletalMesh")
+    item = _make_row(p, "/Game/Foo.uasset")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Mesh", "Preview Properties"]
+
+
+def test_menu_for_unexpanded_uasset_uses_type_cache_texture_only(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    _populate_type_cache(p, "/Game/Foo.uasset", "Texture2D")
+    item = _make_row(p, "/Game/Foo.uasset")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Texture", "Preview Properties"]
+
+
+def test_menu_for_unexpanded_uasset_uses_type_cache_soundwave(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    _populate_type_cache(p, "/Game/Foo.uasset", "SoundWave")
+    item = _make_row(p, "/Game/Foo.uasset")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Audio", "Preview Properties"]
+
+
+def test_menu_for_unexpanded_uasset_cached_as_soundcue_shows_only_props(qtbot):
+    """SoundCue maps to CATEGORY_OTHER — none of the preview kinds match,
+    so only Preview Properties is offered (no inert Preview Audio)."""
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    _populate_type_cache(p, "/Game/Foo.uasset", "SoundCue")
+    item = _make_row(p, "/Game/Foo.uasset")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Properties"]
+
+
+def test_menu_for_unexpanded_uasset_cached_as_akaudioevent_shows_only_props(qtbot):
+    """AkAudioEvent uassets are Wwise metadata — preview the .wav next to
+    them, not the uasset itself."""
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    _populate_type_cache(p, "/Game/Event.uasset", "AkAudioEvent")
+    item = _make_row(p, "/Game/Event.uasset")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Properties"]
 
 
 def test_menu_for_expanded_skeletal_mesh(qtbot):

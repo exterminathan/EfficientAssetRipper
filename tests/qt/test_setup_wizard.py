@@ -43,7 +43,7 @@ def test_wizard_constructs(qtbot, mock_qsettings, patched_probes):
 def test_wizard_navigates_forward(qtbot, mock_qsettings, patched_probes):
     wiz = SetupWizard()
     qtbot.addWidget(wiz)
-    wiz.show()
+    wiz.show()  # required: QWizard.next() needs show() to initialize page machinery
     start = wiz.currentId()
     wiz.next()
     assert wiz.currentId() != start, "next() should advance from welcome page"
@@ -52,7 +52,7 @@ def test_wizard_navigates_forward(qtbot, mock_qsettings, patched_probes):
 def test_wizard_back_button_returns(qtbot, mock_qsettings, patched_probes):
     wiz = SetupWizard()
     qtbot.addWidget(wiz)
-    wiz.show()
+    wiz.show()  # required: QWizard.next()/back() need show() to initialize page machinery
     welcome_id = wiz.currentId()
     wiz.next()
     second_id = wiz.currentId()
@@ -71,7 +71,7 @@ def test_dependency_page_rechecks_and_persists_blender(qtbot, mock_qsettings, mo
 
     wiz = SetupWizard()
     qtbot.addWidget(wiz)
-    wiz.show()
+    wiz.show()  # required: QWizard.next() needs show() to initialize page machinery
     wiz.next()  # advance to dependency page → triggers initializePage → recheck
 
     assert config.get("blender_exe") == r"C:\B\blender.exe"
@@ -81,7 +81,7 @@ def test_skip_button_does_not_set_setup_complete(qtbot, mock_qsettings, patched_
     """The Skip Setup custom button rejects without flipping setup_complete."""
     wiz = SetupWizard()
     qtbot.addWidget(wiz)
-    wiz.show()
+    wiz.show()  # required: QWizard.next() needs show() to initialize page machinery
     skipped = []
     wiz.skipped.connect(lambda: skipped.append(True))
 

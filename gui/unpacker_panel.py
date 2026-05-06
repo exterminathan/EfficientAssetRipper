@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.theme import install_combo_click_to_popup
-from gui.widgets import CollapsibleSection, ZoomableTree
+from gui.widgets import ZoomableTree
 
 import config
 from core import type_cache as type_cache_mod
@@ -115,6 +115,12 @@ class UnpackerPanel(QWidget):
         # Folders auto-expanded by the search/filter. Cleared when search
         # empties so we re-collapse only what we opened, not user-opened nodes.
         self._auto_expanded: "set[QTreeWidgetItem]" = set()
+        # Folders the user explicitly closed. The filter will not re-open
+        # these until the filter is fully cleared.
+        self._user_collapsed: "set[QTreeWidgetItem]" = set()
+        # True during programmatic setExpanded(False) so _on_item_collapsed
+        # doesn't misinterpret it as a user action.
+        self._programmatic_collapse: bool = False
 
         # Debounce timer: coalesces rapid text-input changes into one filter pass.
         self._filter_debounce = QTimer()
@@ -270,6 +276,7 @@ class UnpackerPanel(QWidget):
             self._type_scan_in_progress = False
             self._type_scan_bar.setVisible(False)
             self._auto_expanded.clear()
+            self._user_collapsed.clear()
 
         # Auto-remount when the previous profile was already mounted in this
         # session. Defer to the next event-loop tick so the dialog finishes
@@ -397,15 +404,9 @@ class UnpackerPanel(QWidget):
 
         bottom_layout.addLayout(search_row)
 
-        # ── Filters (asset-type categories + type-contains) ───────────
-        filters_section = CollapsibleSection("Filters", start_expanded=True)
-        filters_layout = QVBoxLayout()
-        filters_layout.setContentsMargins(0, 2, 0, 2)
-        filters_layout.setSpacing(4)
-
-        # Row 1: category checkboxes — all checked by default.
+        # ── Category filter checkboxes (directly under search bar) ───
         cat_row = QHBoxLayout()
-        cat_row.setContentsMargins(0, 0, 0, 0)
+        cat_row.setContentsMargins(0, 2, 0, 2)
         cat_row.addWidget(QLabel("Categories:"))
         self._cat_checkboxes: dict[str, QCheckBox] = {}
         for cat_id, label in (
@@ -422,26 +423,7 @@ class UnpackerPanel(QWidget):
             cat_row.addWidget(cb)
             self._cat_checkboxes[cat_id] = cb
         cat_row.addStretch()
-        filters_layout.addLayout(cat_row)
-
-        # Row 2: free-text type-contains (substring match on raw export_type).
-        type_row = QHBoxLayout()
-        type_row.setContentsMargins(0, 0, 0, 0)
-        type_row.addWidget(QLabel("Type contains:"))
-        self._type_contains = QLineEdit()
-        self._type_contains.setPlaceholderText(
-            "e.g. AnimSequence, Material  (substring, blank=any)"
-        )
-        self._type_contains.setToolTip(
-            "Show only items whose export_type contains this substring "
-            "(case-insensitive). Combines with the category checkboxes."
-        )
-        self._type_contains.textChanged.connect(self._filter_debounce.start)
-        type_row.addWidget(self._type_contains, 1)
-        filters_layout.addLayout(type_row)
-
-        filters_section.set_content_layout(filters_layout)
-        bottom_layout.addWidget(filters_section)
+        bottom_layout.addLayout(cat_row)
 
         # ── Mount info (middle area) ──────────────────────────────────
         self._mount_info = QLabel("")
@@ -460,6 +442,7 @@ class UnpackerPanel(QWidget):
         self._tree.setHeaderLabels(["Name"])
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tree.itemExpanded.connect(self._on_item_expanded)
+        self._tree.itemCollapsed.connect(self._on_item_collapsed)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
@@ -600,6 +583,17 @@ class UnpackerPanel(QWidget):
         lower = vfs_path.lower()
 
         if any(lower.endswith(ext) for ext in self._PACKAGE_FILE_EXTS):
+            # If the package has been expanded, derive categories from real export
+            # children (UserRole+4) — more accurate than the heuristic cache entry.
+            if item.childCount() > 0:
+                child_cats: set[str] = set()
+                for i in range(item.childCount()):
+                    ch = item.child(i)
+                    exp_type = ch.data(0, Qt.ItemDataRole.UserRole + 4)
+                    if exp_type:
+                        child_cats.add(type_cache_mod.category_for_export_type(str(exp_type)))
+                if child_cats:
+                    return child_cats
             if self._type_cache is not None:
                 cats = self._type_cache.categories_for_package(vfs_path)
                 if cats:
@@ -617,47 +611,17 @@ class UnpackerPanel(QWidget):
 
         return {type_cache_mod.CATEGORY_OTHER}
 
-    def _row_export_types(self, item: QTreeWidgetItem) -> "set[str] | None":
-        """Return raw export_type strings for this row, or None for 'unknown'.
-
-        Empty set means: known to have no export types (e.g. plain texture
-        file). Used by the type-contains substring filter.
-        """
-        if item.data(0, Qt.ItemDataRole.UserRole + 2):
-            return {"AkAudioEvent"}
-
-        export_type = item.data(0, Qt.ItemDataRole.UserRole + 4)
-        if export_type:
-            return {str(export_type)}
-
-        if item.data(0, Qt.ItemDataRole.UserRole + 1):
-            return None  # folder
-
-        vfs_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
-        lower = vfs_path.lower()
-
-        if any(lower.endswith(ext) for ext in self._PACKAGE_FILE_EXTS):
-            if self._type_cache is not None:
-                types = self._type_cache.export_types_for_package(vfs_path)
-                if types:
-                    return types
-            if self._type_scan_in_progress:
-                return None
-        return set()
-
-    def _filter_is_active(self, text: str, type_contains: str,
-                          active_cats: set) -> bool:
-        return bool(text) or bool(type_contains) or active_cats != type_cache_mod.ALL_CATEGORIES
+    def _filter_is_active(self, text: str, active_cats: set) -> bool:
+        return bool(text) or active_cats != type_cache_mod.ALL_CATEGORIES
 
     def _filter_tree(self):
         """Filter the VFS tree in-place, hiding non-matching items."""
         text = self._search.text().strip().lower()
-        type_contains = self._type_contains.text().strip().lower()
         active_cats = {
             cat_id for cat_id, cb in self._cat_checkboxes.items() if cb.isChecked()
         }
 
-        is_active = self._filter_is_active(text, type_contains, active_cats)
+        is_active = self._filter_is_active(text, active_cats)
 
         # Batch all visibility changes to avoid per-item repaints stalling the
         # event loop on large trees.
@@ -665,7 +629,7 @@ class UnpackerPanel(QWidget):
         self._tree.setUpdatesEnabled(False)
         try:
             self._filter_tree_recursive(
-                root, text, type_contains, active_cats,
+                root, text, active_cats,
                 parent_name_match=False, is_active=is_active,
             )
         finally:
@@ -674,6 +638,7 @@ class UnpackerPanel(QWidget):
         # When no filter is active, restore folders we auto-opened.
         if not is_active and self._auto_expanded:
             self._tree.setUpdatesEnabled(False)
+            self._programmatic_collapse = True
             try:
                 for opened in list(self._auto_expanded):
                     try:
@@ -681,14 +646,15 @@ class UnpackerPanel(QWidget):
                     except RuntimeError:
                         pass  # item may have been deleted between filter calls
             finally:
+                self._programmatic_collapse = False
                 self._tree.setUpdatesEnabled(True)
             self._auto_expanded.clear()
+            self._user_collapsed.clear()
 
     def _filter_tree_recursive(
         self,
         parent: QTreeWidgetItem,
         text: str,
-        type_contains: str,
         active_cats: set,
         parent_name_match: bool,
         is_active: bool,
@@ -702,7 +668,7 @@ class UnpackerPanel(QWidget):
                     child.setHidden(False)
                 if child.data(0, Qt.ItemDataRole.UserRole + 1):  # is folder
                     self._filter_tree_recursive(
-                        child, text, type_contains, active_cats,
+                        child, text, active_cats,
                         parent_name_match=False, is_active=False,
                     )
             return True
@@ -744,7 +710,7 @@ class UnpackerPanel(QWidget):
                     continue
 
                 descendant_visible = self._filter_tree_recursive(
-                    child, text, type_contains, active_cats,
+                    child, text, active_cats,
                     parent_name_match=parent_name_match or self_name_match,
                     is_active=is_active,
                 )
@@ -752,22 +718,17 @@ class UnpackerPanel(QWidget):
                 child.setHidden(not visible)
                 if visible:
                     any_visible = True
-                    if not child.isExpanded():
+                    if not child.isExpanded() and child not in self._user_collapsed:
                         child.setExpanded(True)
                         self._auto_expanded.add(child)
                 continue
 
-            # Non-folder rows: combine name axis with category + type-contains.
+            # Non-folder rows: combine name axis with category filter.
             type_match = True
             if active_cats != type_cache_mod.ALL_CATEGORIES:
                 cats = self._row_categories(child)
                 if cats is not None and not (cats & active_cats):
                     type_match = False
-            if type_match and type_contains:
-                types = self._row_export_types(child)
-                if types is not None:
-                    if not any(type_contains in t.lower() for t in types):
-                        type_match = False
 
             visible = name_match and type_match
             child.setHidden(not visible)
@@ -847,6 +808,7 @@ class UnpackerPanel(QWidget):
         # Populate root of VFS tree
         self._tree.clear()
         self._auto_expanded.clear()
+        self._user_collapsed.clear()
         self._unpacker.browse("")
 
         # Trigger WWise audio event scan (CLI returns quickly if no WWiseAudio folder)
@@ -1067,7 +1029,6 @@ class UnpackerPanel(QWidget):
         # expensive and unnecessary when everything is already visible.
         if self._filter_is_active(
             self._search.text().strip().lower(),
-            self._type_contains.text().strip().lower(),
             {k for k, cb in self._cat_checkboxes.items() if cb.isChecked()},
         ):
             self._filter_tree()
@@ -1081,13 +1042,6 @@ class UnpackerPanel(QWidget):
     _MESH_EXTS = frozenset({".psk", ".pskx"})
     _PACKAGE_EXTS_FOR_MESH = (".uasset", ".upk", ".umap")
 
-    # Map UE class names returned by CUE4ParseCLI's list_exports to the
-    # preview kind. Anything not listed here falls back to "unknown" and only
-    # offers Preview Properties.
-    _MESH_EXPORT_TYPES = frozenset({"SkeletalMesh", "StaticMesh"})
-    _TEXTURE_EXPORT_TYPES = frozenset({"Texture2D", "TextureCube", "Texture2DArray"})
-    _AUDIO_EXPORT_TYPES = frozenset({"SoundCue", "SoundWave", "AkAudioEvent"})
-
     def _classify_row(self, item: QTreeWidgetItem) -> str:
         """Identify what kind of preview a tree row supports.
 
@@ -1099,17 +1053,20 @@ class UnpackerPanel(QWidget):
           (the user can preview as mesh/texture/audio without expanding;
           the CLI runs a single-format export and we surface what landed)
         - everything else           → "unknown"
+
+        Export-type sets live in core/type_cache so the filter category logic
+        and the preview menu agree on which UE classes are previewable.
         """
         if item.data(0, Qt.ItemDataRole.UserRole + 2):
             return "audio"
 
         export_type = item.data(0, Qt.ItemDataRole.UserRole + 4)
         if export_type:
-            if export_type in self._MESH_EXPORT_TYPES:
+            if export_type in type_cache_mod.MESH_EXPORT_TYPES:
                 return "mesh"
-            if export_type in self._TEXTURE_EXPORT_TYPES:
+            if export_type in type_cache_mod.TEXTURE_EXPORT_TYPES:
                 return "texture"
-            if export_type in self._AUDIO_EXPORT_TYPES:
+            if export_type in type_cache_mod.AUDIO_EXPORT_TYPES:
                 return "audio"
             return "unknown"
 
@@ -1178,9 +1135,9 @@ class UnpackerPanel(QWidget):
         elif kind == "package":
             # If the package has been expanded, its children carry export_type
             # data. Show only the preview buttons matching what's actually
-            # inside. If unexpanded (only the placeholder child exists), we
-            # don't know yet — fall back to offering all three and let the
-            # temp-export sort it out.
+            # inside. If unexpanded (only the placeholder child exists), the
+            # type cache may still know what's in the package — consult it
+            # before falling back to offering all three.
             is_unexpanded = (
                 item.childCount() == 0
                 or (
@@ -1189,9 +1146,21 @@ class UnpackerPanel(QWidget):
                 )
             )
             if is_unexpanded:
-                _add_mesh()
-                _add_texture()
-                _add_audio()
+                cached_cats = (
+                    self._type_cache.categories_for_package(vfs_path)
+                    if self._type_cache is not None else set()
+                )
+                if not cached_cats:
+                    _add_mesh()
+                    _add_texture()
+                    _add_audio()
+                else:
+                    if type_cache_mod.CATEGORY_MESH in cached_cats:
+                        _add_mesh()
+                    if type_cache_mod.CATEGORY_TEXTURE in cached_cats:
+                        _add_texture()
+                    if type_cache_mod.CATEGORY_AUDIO in cached_cats:
+                        _add_audio()
             else:
                 child_kinds = {
                     self._classify_row(item.child(i))
@@ -1486,7 +1455,6 @@ class UnpackerPanel(QWidget):
         # Re-apply filter only when one is active (same reasoning as _on_browse_result).
         if self._filter_is_active(
             self._search.text().strip().lower(),
-            self._type_contains.text().strip().lower(),
             {k for k, cb in self._cat_checkboxes.items() if cb.isChecked()},
         ):
             self._filter_tree()
@@ -1561,10 +1529,21 @@ class UnpackerPanel(QWidget):
 
     @Slot(QTreeWidgetItem)
     def _on_item_expanded(self, item: QTreeWidgetItem):
+        # User manually expanded — remove from user_collapsed so the filter
+        # can auto-expand it again if needed.
+        self._user_collapsed.discard(item)
         # Check if this node only has the placeholder → need to fetch children
         if item.childCount() == 1 and item.child(0).data(0, Qt.ItemDataRole.UserRole) == _PLACEHOLDER:
             vfs_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
             self._unpacker.browse(vfs_path)
+
+    def _on_item_collapsed(self, item: QTreeWidgetItem):
+        if self._programmatic_collapse:
+            return
+        # Any user collapse is remembered so the filter doesn't silently
+        # re-open the folder on the next filter pass.
+        self._auto_expanded.discard(item)
+        self._user_collapsed.add(item)
 
     def _find_tree_item(self, vfs_path: str) -> QTreeWidgetItem | None:
         """Walk the tree to find the item matching *vfs_path*."""
@@ -1901,7 +1880,11 @@ class UnpackerPanel(QWidget):
         path = QFileDialog.getExistingDirectory(self, "Select Game Content Folder", start)
         if path:
             self._game_dir_edit.setText(path)
-            self._ue_version_user_set = False
+            # Only allow auto-detect to overwrite generic versions (GAME_UE4_x / GAME_UE5_x).
+            # Game-specific overrides like GAME_RocketLeague must not be clobbered.
+            current_ver = self._ue_version_combo.currentText()
+            if current_ver.startswith(("GAME_UE4_", "GAME_UE5_")):
+                self._ue_version_user_set = False
             if self._unpacker.is_running:
                 self._unpacker.detect_ue_version(path)
 

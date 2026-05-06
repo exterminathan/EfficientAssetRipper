@@ -20,7 +20,11 @@ def test_category_for_export_type_known_buckets():
     assert tc.category_for_export_type("Texture2D") == tc.CATEGORY_TEXTURE
     assert tc.category_for_export_type("TextureCube") == tc.CATEGORY_TEXTURE
     assert tc.category_for_export_type("SoundWave") == tc.CATEGORY_AUDIO
-    assert tc.category_for_export_type("AkAudioEvent") == tc.CATEGORY_AUDIO
+    # SoundCue (composite) and AkAudioEvent (Wwise metadata) are not
+    # previewable as audio — the .wav files next to them are. Both fall
+    # through to CATEGORY_OTHER.
+    assert tc.category_for_export_type("SoundCue") == tc.CATEGORY_OTHER
+    assert tc.category_for_export_type("AkAudioEvent") == tc.CATEGORY_OTHER
     assert tc.category_for_export_type("Material") == tc.CATEGORY_MATERIAL
     assert tc.category_for_export_type("MaterialInstanceConstant") == tc.CATEGORY_MATERIAL
     assert tc.category_for_export_type("AnimSequence") == tc.CATEGORY_ANIMATION
