@@ -27,6 +27,7 @@ qt_api = "pyside6"
 qt_qpa_platform = "offscreen"
 filterwarnings = [
     "ignore::DeprecationWarning:PySide6.*",
+    "ignore:Unknown config option.*qt_qpa_platform:pytest.PytestConfigWarning",
 ]
 
 [tool.coverage.run]

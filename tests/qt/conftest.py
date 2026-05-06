@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# Must be set before QApplication is created (pytest-qt creates it lazily on
+# first qtbot use). Suppresses real windows during headless CI/build runs.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 @pytest.fixture(scope="session")
