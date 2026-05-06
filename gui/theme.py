@@ -497,6 +497,10 @@ QMenu::item:selected {{
     color: {c["text_bright"]};
 }}
 
+QMenu::item:disabled {{
+    color: {c["text_disabled"]};
+}}
+
 QMenu::separator {{
     height: 1px;
     background-color: {c["border"]};

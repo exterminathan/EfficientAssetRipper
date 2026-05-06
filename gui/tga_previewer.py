@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
+import shutil
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, Signal
@@ -9,6 +12,15 @@ from PySide6.QtGui import QImage, QPixmap, QPainter, QWheelEvent, QDragEnterEven
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
 
 from PIL import Image as PILImage
+
+
+def _wipe_temp_dir(path: Path) -> None:
+    """atexit hook — remove the temp dir, swallowing all errors."""
+    try:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
 
 # Force PIL plugin discovery on the GUI thread up front. PIL's `preinit()`
 # imports image-format plugin modules lazily on first `Image.open()`, and
@@ -86,6 +98,17 @@ class TGAPreviewerPanel(QWidget):
         self._load_signals = _ImageLoadSignals()
         self._load_signals.loaded.connect(self._on_load_done)
         self._load_signals.failed.connect(self._on_load_failed)
+
+        # Temp dir for unpacker preview-only exports — same pattern as the
+        # audio previewer. Lets the user peek at textures without writing
+        # them into the configured export folder.
+        self._temp_dir = Path(tempfile.mkdtemp(prefix="ear_tga_preview_"))
+        atexit.register(_wipe_temp_dir, self._temp_dir)
+
+    @property
+    def temp_dir(self) -> Path:
+        """Temp directory the unpacker can drop preview-only textures into."""
+        return self._temp_dir
 
     # ------------------------------------------------------------------
     # Drag and drop

@@ -94,7 +94,12 @@ class UnpackerPanel(QWidget):
         self._wwise_scan_done = False
         self._pending_wwise_export: tuple[list[dict], str] | None = None  # (entries, output_dir)
         self._audio_preview_temp_dir: "Path | None" = None   # set from main_window
-        self._pending_temp_preview: str | None = None         # expected temp file path after export
+        self._mesh_preview_temp_dir: "Path | None" = None    # set from main_window
+        self._tga_preview_temp_dir: "Path | None" = None     # set from main_window
+        # Pending temp-export-for-preview state. Tuple is (expected_path, kind)
+        # where kind ∈ {"audio", "mesh", "texture"} so _on_export_done can
+        # dispatch to the right preview signal once the file lands on disk.
+        self._pending_temp_preview: "tuple[str, str] | None" = None
 
         self._build_ui()
         self._connect_signals()
@@ -657,6 +662,44 @@ class UnpackerPanel(QWidget):
     _MESH_EXTS = frozenset({".psk", ".pskx"})
     _PACKAGE_EXTS_FOR_MESH = (".uasset", ".upk", ".umap")
 
+    # Map UE class names returned by CUE4ParseCLI's list_exports to the
+    # preview kind. Anything not listed here falls back to "unknown" and only
+    # offers Preview Properties.
+    _MESH_EXPORT_TYPES = frozenset({"SkeletalMesh", "StaticMesh"})
+    _TEXTURE_EXPORT_TYPES = frozenset({"Texture2D", "TextureCube", "Texture2DArray"})
+    _AUDIO_EXPORT_TYPES = frozenset({"SoundCue", "SoundWave", "AkAudioEvent"})
+
+    def _classify_row(self, item: QTreeWidgetItem) -> str:
+        """Identify what kind of preview a tree row supports.
+
+        Returns one of "mesh", "texture", "audio", "unknown". Folders are
+        filtered out earlier — this is only called on file rows.
+        Priority: audio_data (WWise virtual entry) > export_type (when a
+        package was expanded) > file suffix.
+        """
+        if item.data(0, Qt.ItemDataRole.UserRole + 2):
+            return "audio"
+
+        export_type = item.data(0, Qt.ItemDataRole.UserRole + 4)
+        if export_type:
+            if export_type in self._MESH_EXPORT_TYPES:
+                return "mesh"
+            if export_type in self._TEXTURE_EXPORT_TYPES:
+                return "texture"
+            if export_type in self._AUDIO_EXPORT_TYPES:
+                return "audio"
+            return "unknown"
+
+        vfs_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
+        suffix = Path(vfs_path.lower()).suffix
+        if suffix in self._AUDIO_EXTS:
+            return "audio"
+        if suffix in self._IMAGE_EXTS:
+            return "texture"
+        if suffix in self._MESH_EXTS:
+            return "mesh"
+        return "unknown"
+
     def _show_context_menu(self, pos):
         item = self._tree.itemAt(pos)
         if item is None:
@@ -667,49 +710,39 @@ class UnpackerPanel(QWidget):
             return
 
         is_folder = item.data(0, Qt.ItemDataRole.UserRole + 1)
-        audio_data = item.data(0, Qt.ItemDataRole.UserRole + 2)
-
         if is_folder:
             return
 
-        suffix = Path(vfs_path.lower()).suffix
+        audio_data = item.data(0, Qt.ItemDataRole.UserRole + 2)
+        kind = self._classify_row(item)
 
         menu = QMenu(self)
 
-        if audio_data or suffix in self._AUDIO_EXTS:
+        # Type-specific preview action — temp-exports if needed, so we never
+        # disable the menu item with a "you must export first" tooltip.
+        if kind == "mesh":
+            act = QAction("Preview Mesh", self)
+            act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_mesh_vfs(p))
+            menu.addAction(act)
+        elif kind == "texture":
+            act = QAction("Preview Texture", self)
+            act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_texture_vfs(p))
+            menu.addAction(act)
+        elif kind == "audio":
             act = QAction("Preview Audio", self)
             if audio_data:
                 act.triggered.connect(lambda checked=False, d=audio_data: self._try_audio_preview(d))
             else:
                 act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_audio_vfs(p))
             menu.addAction(act)
-        elif suffix in self._IMAGE_EXTS:
-            act = QAction("Preview Image", self)
-            act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_image_vfs(p))
-            menu.addAction(act)
-        elif suffix in self._MESH_EXTS or suffix in self._PACKAGE_EXTS_FOR_MESH:
-            # Package files often contain meshes — surface a Preview Mesh action that
-            # only enables once the user has exported. Files already on disk as .psk
-            # / .pskx work directly.
-            local_psk = self._find_local_mesh(vfs_path)
-            act = QAction("Preview Mesh", self)
-            if local_psk is None:
-                act.setEnabled(False)
-                act.setToolTip("Export this asset first to preview its mesh")
-            else:
-                act.triggered.connect(lambda checked=False, p=str(local_psk): self.mesh_preview.emit(p))
-            menu.addAction(act)
 
-            act_props = QAction("View Properties", self)
-            act_props.triggered.connect(lambda checked=False, p=vfs_path: self._preview_props_ctx(p))
-            menu.addAction(act_props)
-        else:
-            act = QAction("View Properties", self)
-            act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_props_ctx(p))
-            menu.addAction(act)
+        # Properties always available — the CLI's get_props returns inline
+        # JSON regardless of asset type, so this never has to disable.
+        act_props = QAction("Preview Properties", self)
+        act_props.triggered.connect(lambda checked=False, p=vfs_path: self._preview_props_ctx(p))
+        menu.addAction(act_props)
 
-        if menu.actions():
-            menu.exec(self._tree.viewport().mapToGlobal(pos))
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _find_local_mesh(self, vfs_path: str) -> "Path | None":
         """Locate an exported PSK/PSKX for *vfs_path* if one is on disk.
@@ -778,55 +811,126 @@ class UnpackerPanel(QWidget):
                 return c
         return None
 
-    def _preview_audio_vfs(self, vfs_path: str):
-        """Preview a VFS audio file — use local export if available, else temp-export."""
-        local = self._find_local_file(vfs_path)
-        if local:
-            self.audio_preview.emit(str(local))
-            return
+    # ------------------------------------------------------------------
+    # Temp-export-for-preview
+    # ------------------------------------------------------------------
 
-        # Check temp dir for previously-previewed files
-        if self._audio_preview_temp_dir:
+    def _temp_dir_for_kind(self, kind: str) -> "Path | None":
+        if kind == "audio":
+            return self._audio_preview_temp_dir
+        if kind == "mesh":
+            return self._mesh_preview_temp_dir
+        if kind == "texture":
+            return self._tga_preview_temp_dir
+        return None
+
+    def _candidate_extensions_for_kind(self, kind: str) -> tuple[str, ...]:
+        """Output extensions the CLI may produce for a given preview kind."""
+        if kind == "audio":
             audio_format = config.get("export_audio_format") or "wav"
-            temp_candidate = self._audio_preview_temp_dir / vfs_path.lstrip("/")
-            temp_candidate = temp_candidate.with_suffix(f".{audio_format}")
-            if temp_candidate.is_file():
-                self.audio_preview.emit(str(temp_candidate))
-                return
+            return (f".{audio_format}", ".wav", ".ogg")
+        if kind == "mesh":
+            return (".psk", ".pskx")
+        if kind == "texture":
+            tex_format = config.get("export_texture_format") or "png"
+            return (f".{tex_format}", ".png", ".tga", ".dds")
+        return ()
 
-        # Export to temp dir for preview
+    def _find_in_temp(self, temp_dir: Path, vfs_path: str, kind: str) -> "Path | None":
+        """Look for an already-previewed copy of *vfs_path* in *temp_dir*.
+
+        Mirrors `_find_local_file`'s candidate enumeration but rooted at the
+        previewer's temp dir. Tries the VFS-mirrored path first, then the
+        flat filename layout, and within each tries every output extension
+        the CLI might have written for this kind.
+        """
+        candidates: list[Path] = []
+        nested = temp_dir / vfs_path.lstrip("/")
+        flat = temp_dir / vfs_path.rsplit("/", 1)[-1]
+        for base in (nested, flat):
+            candidates.append(base)
+            for ext in self._candidate_extensions_for_kind(kind):
+                candidates.append(base.with_suffix(ext))
+        for c in candidates:
+            if c.is_file():
+                return c
+        return None
+
+    def _predict_temp_output(self, temp_dir: Path, vfs_path: str, kind: str) -> Path:
+        """Best guess at where the CLI will write the previewed file."""
+        nested = temp_dir / vfs_path.lstrip("/")
+        exts = self._candidate_extensions_for_kind(kind)
+        if exts:
+            return nested.with_suffix(exts[0])
+        return nested
+
+    def _kick_temp_export(self, vfs_path: str, kind: str):
+        """Shared launcher for mesh / texture / audio temp-export-for-preview."""
         if self._exporting:
             self._status_label.setText("Export in progress — try again after it finishes")
             return
         if not self._mounted:
             self._status_label.setText("Mount an archive first")
             return
-        if not self._audio_preview_temp_dir:
-            self._status_label.setText("Audio not exported yet — export it first to preview")
+        temp_dir = self._temp_dir_for_kind(kind)
+        if temp_dir is None:
+            self._status_label.setText(f"{kind.capitalize()} preview temp dir not configured")
             return
 
-        temp_dir = str(self._audio_preview_temp_dir)
-        audio_format = config.get("export_audio_format") or "wav"
-        # Predict output path
-        name = vfs_path.rsplit("/", 1)[-1]
-        expected = Path(temp_dir) / vfs_path.lstrip("/")
-        expected = expected.with_suffix(f".{audio_format}")
-        self._pending_temp_preview = str(expected)
+        formats = {"mesh": False, "texture": False, "props": False,
+                   "animation": False, "audio": False}
+        formats[kind] = True
 
+        expected = self._predict_temp_output(Path(temp_dir), vfs_path, kind)
+        self._pending_temp_preview = (str(expected), kind)
+
+        name = vfs_path.rsplit("/", 1)[-1] or vfs_path
         self._status_label.setText(f"Exporting for preview: {name}")
         self._begin_export()
-        self._unpacker.export([vfs_path], temp_dir,
-                              formats={"mesh": False, "texture": False, "props": False,
-                                       "animation": False, "audio": True},
-                              audio_format=audio_format)
+        self._unpacker.export(
+            [vfs_path], str(temp_dir), formats=formats,
+            texture_format=config.get("export_texture_format") or "png",
+            audio_format=config.get("export_audio_format") or "wav",
+        )
 
-    def _preview_image_vfs(self, vfs_path: str):
-        """Preview a VFS image file from the local export directory."""
+    def _preview_audio_vfs(self, vfs_path: str):
+        """Preview a VFS audio file — use local export if available, else temp-export."""
+        local = self._find_local_file(vfs_path)
+        if local:
+            self.audio_preview.emit(str(local))
+            return
+        if self._audio_preview_temp_dir:
+            cached = self._find_in_temp(self._audio_preview_temp_dir, vfs_path, "audio")
+            if cached:
+                self.audio_preview.emit(str(cached))
+                return
+        self._kick_temp_export(vfs_path, "audio")
+
+    def _preview_mesh_vfs(self, vfs_path: str):
+        """Preview a VFS mesh — local export if present, else temp-export."""
+        local = self._find_local_mesh(vfs_path)
+        if local:
+            self.mesh_preview.emit(str(local))
+            return
+        if self._mesh_preview_temp_dir:
+            cached = self._find_in_temp(self._mesh_preview_temp_dir, vfs_path, "mesh")
+            if cached:
+                self.mesh_preview.emit(str(cached))
+                return
+        self._kick_temp_export(vfs_path, "mesh")
+
+    def _preview_texture_vfs(self, vfs_path: str):
+        """Preview a VFS texture — local export if present, else temp-export."""
         local = self._find_local_file(vfs_path)
         if local:
             self.tga_preview.emit(str(local))
-        else:
-            self._status_label.setText("Image not exported yet — export it first to preview")
+            return
+        if self._tga_preview_temp_dir:
+            cached = self._find_in_temp(self._tga_preview_temp_dir, vfs_path, "texture")
+            if cached:
+                self.tga_preview.emit(str(cached))
+                return
+        self._kick_temp_export(vfs_path, "texture")
 
     def _preview_props_ctx(self, vfs_path: str):
         """Load and display VFS file properties in the Text Viewer."""
@@ -902,6 +1006,9 @@ class UnpackerPanel(QWidget):
             # Store the parent package path so export can use it
             child.setData(0, Qt.ItemDataRole.UserRole, path)
             child.setData(0, Qt.ItemDataRole.UserRole + 1, False)  # not a folder
+            # Stash the export_type so the right-click menu can pick the
+            # correct "Preview …" action label without re-parsing display text.
+            child.setData(0, Qt.ItemDataRole.UserRole + 4, export_type)
             child.setToolTip(0, f"Type: {export_type}\nPackage: {path}")
 
         item.setExpanded(True)
@@ -962,7 +1069,7 @@ class UnpackerPanel(QWidget):
             "target_folder": full_folder,
         }
         expected = self._audio_preview_temp_dir / full_folder / f"{audio_data['debug_name']}.{audio_format}"
-        self._pending_temp_preview = str(expected)
+        self._pending_temp_preview = (str(expected), "audio")
 
         self._status_label.setText(f"Exporting for preview: {audio_data['debug_name']}")
         self._begin_export()
@@ -1173,28 +1280,46 @@ class UnpackerPanel(QWidget):
                 audio_format=config.get("export_audio_format"))
             return
 
-        # Handle temp audio preview export
+        # Handle temp-export-for-preview (audio / mesh / texture)
         if self._pending_temp_preview:
-            expected = self._pending_temp_preview
+            expected, kind = self._pending_temp_preview
             self._pending_temp_preview = None
             self._exporting = False
             self._export_btn.setEnabled(True)
             self._export_folder_btn.setEnabled(True)
             self._cancel_btn.setEnabled(False)
-            # Try to find the exported file (may have slightly different path)
+
+            signal_for_kind = {
+                "audio": self.audio_preview,
+                "mesh": self.mesh_preview,
+                "texture": self.tga_preview,
+            }.get(kind)
+
+            resolved: "Path | None" = None
             if Path(expected).is_file():
-                self._status_label.setText("Ready")
-                self.audio_preview.emit(expected)
+                resolved = Path(expected)
             elif succeeded:
-                # Use the first succeeded path as fallback
-                fallback = Path(succeeded[0])
-                if fallback.is_file():
-                    self._status_label.setText("Ready")
-                    self.audio_preview.emit(str(fallback))
-                else:
-                    self._status_label.setText("Preview export completed but file not found")
+                # CLI may have written under a slightly different path (e.g.
+                # extension swap). Prefer a succeeded entry whose extension
+                # matches the kind; otherwise take the first succeeded file.
+                exts = {e.lower() for e in self._candidate_extensions_for_kind(kind)}
+                for p in succeeded:
+                    cand = Path(p)
+                    if cand.is_file() and (not exts or cand.suffix.lower() in exts):
+                        resolved = cand
+                        break
+                if resolved is None:
+                    cand = Path(succeeded[0])
+                    if cand.is_file():
+                        resolved = cand
+
+            if resolved is not None and signal_for_kind is not None:
+                self._status_label.setText("Ready")
+                signal_for_kind.emit(str(resolved))
+            elif signal_for_kind is None:
+                self._status_label.setText(f"Preview kind {kind!r} has no signal")
             else:
-                self._status_label.setText("Preview export failed")
+                self._status_label.setText("Preview export completed but file not found")
             return
 
         self._exporting = False

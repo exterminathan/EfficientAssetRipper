@@ -65,3 +65,13 @@ def test_load_failed_shows_error_label(qtbot):
     w._on_load_failed(token=1, name="bad.tga", error="decode error")
     assert "Failed" in w._label.text()
     assert "decode error" in w._label.text()
+
+
+def test_temp_dir_property_exists_and_directory_created(qtbot):
+    """The unpacker drops preview-only textures here, so it must exist."""
+    from pathlib import Path
+    w = TGAPreviewerPanel()
+    qtbot.addWidget(w)
+    assert isinstance(w.temp_dir, Path)
+    assert w.temp_dir.is_dir()
+    assert w.temp_dir.name.startswith("ear_tga_preview_")

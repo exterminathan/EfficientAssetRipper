@@ -144,6 +144,16 @@ def test_meshglview_default_orientation_is_unit(qtbot):
     assert abs(float(np.linalg.norm(v._orientation)) - 1.0) < 1e-6
 
 
+def test_mesh_previewer_temp_dir_exists(qtbot):
+    """The unpacker drops preview-only PSKs here, so it must exist."""
+    from pathlib import Path
+    p = MeshPreviewerPanel()
+    qtbot.addWidget(p)
+    assert isinstance(p.temp_dir, Path)
+    assert p.temp_dir.is_dir()
+    assert p.temp_dir.name.startswith("ear_mesh_preview_")
+
+
 def test_meshglview_reset_view_restores_default_orientation(qtbot):
     import numpy as np
     from gui.mesh_previewer import _quat_axis_angle

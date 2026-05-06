@@ -415,8 +415,12 @@ class MainWindow(QMainWindow):
         self._unpacker_panel.tga_preview.connect(self._on_tga_preview)
         self._unpacker_panel.mesh_preview.connect(self._on_mesh_preview)
 
-        # Give unpacker panel access to the audio previewer's temp directory
+        # Give the unpacker access to each previewer's temp directory so it
+        # can drop preview-only exports there instead of the user's real
+        # output folder.
         self._unpacker_panel._audio_preview_temp_dir = self._audio_previewer.temp_dir
+        self._unpacker_panel._mesh_preview_temp_dir = self._mesh_previewer.temp_dir
+        self._unpacker_panel._tga_preview_temp_dir = self._tga_previewer.temp_dir
 
     def _show_in_text_viewer(self, title: str, text: str):
         """Display text content in the Text Viewer tab and switch to it."""

@@ -7,8 +7,11 @@ toolbar: flat-lit color, UV checker grid, and wireframe.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import math
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +41,16 @@ import gui.theme as theme
 from core.psk_reader import PskMesh, PskParseError, read_psk
 
 log = logging.getLogger(__name__)
+
+
+def _wipe_temp_dir(path: Path) -> None:
+    """atexit hook — remove the temp dir, swallowing all errors so a failure
+    here can't poison interpreter shutdown."""
+    try:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +700,12 @@ class MeshPreviewerPanel(QWidget):
         self._load_signals.loaded.connect(self._on_load_done)
         self._load_signals.failed.connect(self._on_load_failed)
 
+        # Temp dir for temp-export-for-preview from the unpacker. Mirrors the
+        # AudioPreviewerPanel pattern — gives the unpacker a place to drop
+        # preview-only PSKs that never pollute the user's real export folder.
+        self._temp_dir = Path(tempfile.mkdtemp(prefix="ear_mesh_preview_"))
+        atexit.register(_wipe_temp_dir, self._temp_dir)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -753,6 +772,11 @@ class MeshPreviewerPanel(QWidget):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def temp_dir(self) -> Path:
+        """Temp directory the unpacker can write preview-only PSKs into."""
+        return self._temp_dir
 
     def load_psk(self, path: str | Path):
         """Parse and display a PSK / PSKX file. Heavy work runs on a thread."""
