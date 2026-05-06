@@ -672,10 +672,14 @@ class UnpackerPanel(QWidget):
     def _classify_row(self, item: QTreeWidgetItem) -> str:
         """Identify what kind of preview a tree row supports.
 
-        Returns one of "mesh", "texture", "audio", "unknown". Folders are
-        filtered out earlier — this is only called on file rows.
-        Priority: audio_data (WWise virtual entry) > export_type (when a
-        package was expanded) > file suffix.
+        Returns one of "mesh", "texture", "audio", "package", "unknown".
+        - audio_data set            → "audio" (WWise virtual entry)
+        - export_type set           → mapped to mesh/texture/audio or "unknown"
+        - file with mesh/audio/img extension → that type
+        - .uasset/.upk/.umap that hasn't been expanded yet → "package"
+          (the user can preview as mesh/texture/audio without expanding;
+          the CLI runs a single-format export and we surface what landed)
+        - everything else           → "unknown"
         """
         if item.data(0, Qt.ItemDataRole.UserRole + 2):
             return "audio"
@@ -698,13 +702,20 @@ class UnpackerPanel(QWidget):
             return "texture"
         if suffix in self._MESH_EXTS:
             return "mesh"
+        if suffix in self._PACKAGE_EXTS_FOR_MESH:
+            return "package"
         return "unknown"
 
     def _show_context_menu(self, pos):
         item = self._tree.itemAt(pos)
         if item is None:
             return
+        self._popup_context_menu(item, self._tree.viewport().mapToGlobal(pos))
 
+    def _popup_context_menu(self, item: QTreeWidgetItem, global_pos):
+        """Build and show the right-click menu for *item*. Split out from
+        `_show_context_menu` so tests can drive it directly without poking
+        the QTreeWidget's internal hit-testing."""
         vfs_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
         if vfs_path == _PLACEHOLDER:
             return
@@ -718,17 +729,20 @@ class UnpackerPanel(QWidget):
 
         menu = QMenu(self)
 
-        # Type-specific preview action — temp-exports if needed, so we never
-        # disable the menu item with a "you must export first" tooltip.
-        if kind == "mesh":
+        # Type-specific preview action(s) — temp-exports if needed, so we
+        # never have to disable the menu item with a "must export first"
+        # tooltip.
+        def _add_mesh():
             act = QAction("Preview Mesh", self)
             act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_mesh_vfs(p))
             menu.addAction(act)
-        elif kind == "texture":
+
+        def _add_texture():
             act = QAction("Preview Texture", self)
             act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_texture_vfs(p))
             menu.addAction(act)
-        elif kind == "audio":
+
+        def _add_audio():
             act = QAction("Preview Audio", self)
             if audio_data:
                 act.triggered.connect(lambda checked=False, d=audio_data: self._try_audio_preview(d))
@@ -736,13 +750,27 @@ class UnpackerPanel(QWidget):
                 act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_audio_vfs(p))
             menu.addAction(act)
 
+        if kind == "mesh":
+            _add_mesh()
+        elif kind == "texture":
+            _add_texture()
+        elif kind == "audio":
+            _add_audio()
+        elif kind == "package":
+            # Unexpanded .uasset/.upk/.umap — we don't know what's inside
+            # without a list_exports round-trip, so offer all three preview
+            # kinds and let the temp-export figure it out.
+            _add_mesh()
+            _add_texture()
+            _add_audio()
+
         # Properties always available — the CLI's get_props returns inline
         # JSON regardless of asset type, so this never has to disable.
         act_props = QAction("Preview Properties", self)
         act_props.triggered.connect(lambda checked=False, p=vfs_path: self._preview_props_ctx(p))
         menu.addAction(act_props)
 
-        menu.exec(self._tree.viewport().mapToGlobal(pos))
+        menu.exec(global_pos)
 
     def _find_local_mesh(self, vfs_path: str) -> "Path | None":
         """Locate an exported PSK/PSKX for *vfs_path* if one is on disk.

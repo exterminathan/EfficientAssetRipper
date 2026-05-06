@@ -6,12 +6,38 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QTreeWidgetItem
+from PySide6.QtCore import Qt, QPoint
+from PySide6.QtWidgets import QMenu, QTreeWidgetItem
 
 from gui.unpacker_panel import UnpackerPanel
 
 pytestmark = pytest.mark.qt
+
+
+def _capture_menu_actions(panel: UnpackerPanel, item: QTreeWidgetItem) -> list[str]:
+    """Drive `_popup_context_menu` and return the list of action labels.
+
+    Patches `QMenu.__init__` so the *next* QMenu created has its `exec`
+    replaced by a recorder. This is the only reliable way to introspect
+    a QMenu built and shown inside a single Python call — class-level
+    method patches don't take on the C++-backed exec slot.
+    """
+    captured: list[list[str]] = []
+    orig_init = QMenu.__init__
+
+    def hooked(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        def _rec(*a, **k):
+            captured.append([action.text() for action in self.actions()])
+            return None
+        self.exec = _rec  # type: ignore[assignment]
+
+    QMenu.__init__ = hooked  # type: ignore[assignment]
+    try:
+        panel._popup_context_menu(item, QPoint(0, 0))
+    finally:
+        QMenu.__init__ = orig_init  # type: ignore[assignment]
+    return captured[0] if captured else []
 
 
 # ---------------------------------------------------------------------------
@@ -19,12 +45,13 @@ pytestmark = pytest.mark.qt
 # ---------------------------------------------------------------------------
 
 def _make_row(panel: UnpackerPanel, vfs_path: str, *,
+              is_folder: bool = False,
               audio_data: dict | None = None,
               export_type: str | None = None) -> QTreeWidgetItem:
     """Build a tree item with the same UserRole layout as the real panel."""
     item = QTreeWidgetItem(panel._tree)
     item.setData(0, Qt.ItemDataRole.UserRole, vfs_path)
-    item.setData(0, Qt.ItemDataRole.UserRole + 1, False)  # not a folder
+    item.setData(0, Qt.ItemDataRole.UserRole + 1, is_folder)
     if audio_data is not None:
         item.setData(0, Qt.ItemDataRole.UserRole + 2, audio_data)
     if export_type is not None:
@@ -84,7 +111,12 @@ def test_classify_row_extension_fallbacks(qtbot):
         ("/Game/M.pskx", "mesh"),
         ("/Game/A.wav", "audio"),
         ("/Game/A.wem", "audio"),
-        ("/Game/X.uasset", "unknown"),  # no export_type yet
+        # Unexpanded packages classify as "package" — the menu offers all
+        # three preview kinds for them since we don't know the contents.
+        ("/Game/X.uasset", "package"),
+        ("/Game/X.upk", "package"),
+        ("/Game/X.umap", "package"),
+        ("/Game/X.weird", "unknown"),
     ]
     for vfs, expected in cases:
         item = _make_row(p, vfs)
@@ -209,18 +241,76 @@ def test_kick_temp_export_refuses_when_not_mounted(qtbot):
 # Context menu construction
 # ---------------------------------------------------------------------------
 
-def test_show_context_menu_skipped_for_folders(qtbot):
-    """Folder rows have no preview semantics — the menu must not appear."""
+# ---------------------------------------------------------------------------
+# Menu rendering — what's actually in the popup
+# ---------------------------------------------------------------------------
+
+def test_menu_for_unexpanded_uasset_offers_all_preview_kinds(qtbot):
+    """An unexpanded .uasset could be a mesh, texture, or audio asset; the
+    menu must offer all three so the user doesn't have to expand first."""
     p = UnpackerPanel()
     qtbot.addWidget(p)
-    item = QTreeWidgetItem(p._tree)
-    item.setData(0, Qt.ItemDataRole.UserRole, "/Game/Folder")
-    item.setData(0, Qt.ItemDataRole.UserRole + 1, True)  # is_folder
+    item = _make_row(p, "/Game/Foo.uasset")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Mesh", "Preview Texture", "Preview Audio", "Preview Properties"]
 
-    # _show_context_menu calls menu.exec() at the end; we can't easily
-    # intercept the popup from a unit test. Instead just verify the early
-    # return doesn't raise — by patching menu.exec() out via a stand-in.
-    # Easiest: tap _classify_row directly (the menu logic just dispatches).
-    # We check folder rows return early in _show_context_menu by ensuring
-    # the data-flag is honoured upstream.
-    assert item.data(0, Qt.ItemDataRole.UserRole + 1) is True
+
+def test_menu_for_expanded_skeletal_mesh(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Foo.uasset", export_type="SkeletalMesh")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Mesh", "Preview Properties"]
+
+
+def test_menu_for_expanded_texture2d(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Foo.uasset", export_type="Texture2D")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Texture", "Preview Properties"]
+
+
+def test_menu_for_expanded_unknown_export_type_shows_only_props(qtbot):
+    """An export type we don't know how to preview (e.g. Material) still
+    shows Preview Properties so the user can inspect it."""
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Foo.uasset", export_type="Material")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Properties"]
+
+
+def test_menu_for_loose_psk_file(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Mesh.psk")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Mesh", "Preview Properties"]
+
+
+def test_menu_for_loose_image_file(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Tex.png")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Texture", "Preview Properties"]
+
+
+def test_menu_for_wwise_virtual_audio(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/audio.wem",
+                     audio_data={"wem_vfs_path": "/x", "debug_name": "x"})
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Audio", "Preview Properties"]
+
+
+def test_menu_skipped_for_folders(qtbot):
+    """Folder rows produce no menu at all — the early return prevents any
+    QMenu from being constructed."""
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Folder", is_folder=True)
+    actions = _capture_menu_actions(p, item)
+    assert actions == []
