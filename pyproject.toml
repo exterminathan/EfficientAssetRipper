@@ -24,6 +24,7 @@ markers = [
     "windows_only: skip if not running on win32",
 ]
 qt_api = "pyside6"
+qt_qpa_platform = "offscreen"
 filterwarnings = [
     "ignore::DeprecationWarning:PySide6.*",
 ]

@@ -296,23 +296,6 @@ QTreeWidget::branch, QTreeView::branch {{
     background-color: transparent;
 }}
 
-/* Branch indicators — solid circle (collapsed) / hollow circle (expanded) */
-QTreeWidget::branch:has-children:!has-siblings:closed,
-QTreeWidget::branch:closed:has-children:has-siblings,
-QTreeView::branch:has-children:!has-siblings:closed,
-QTreeView::branch:closed:has-children:has-siblings {{
-    image: none;
-    border-image: none;
-}}
-
-QTreeWidget::branch:open:has-children:!has-siblings,
-QTreeWidget::branch:open:has-children:has-siblings,
-QTreeView::branch:open:has-children:!has-siblings,
-QTreeView::branch:open:has-children:has-siblings {{
-    image: none;
-    border-image: none;
-}}
-
 /* ===== QTableWidget ================================================ */
 
 QTableWidget {{
@@ -630,8 +613,8 @@ QPushButton[cssClass="collapsible"]:hover {{
 # Custom branch-indicator style (solid / hollow circles)
 # ---------------------------------------------------------------------------
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QBrush, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QBrush, QPainter, QPolygonF
 from PySide6.QtWidgets import QProxyStyle, QStyle, QStyleOption
 
 
@@ -650,7 +633,6 @@ class _BranchCircleStyle(QProxyStyle):
         super().__init__(base_style)
         self._accent = QColor(accent_color)
         self._arrow = QColor(arrow_color) if arrow_color else QColor(accent_color)
-        self._diameter = 10  # px
 
     def drawPrimitive(self, element, option, painter, widget=None):
         if element == QStyle.PrimitiveElement.PE_IndicatorBranch:
@@ -660,22 +642,30 @@ class _BranchCircleStyle(QProxyStyle):
                 painter.save()
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 r = option.rect
-                d = self._diameter
-                cx = r.center().x()
-                cy = r.center().y()
-                rect = QRectF(cx - d / 2, cy - d / 2, d, d)
+                cx = float(r.center().x()) + 0.5
+                cy = float(r.center().y()) + 0.5
+                # Triangle: 10 wide × 7 tall, centered in the branch cell
+                hw = 5.0  # half-width
+                hh = 3.5  # half-height
 
                 if is_open:
-                    # Hollow circle
-                    pen = QPen(self._accent, 2.0)
-                    painter.setPen(pen)
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    # ▼ down-pointing (expanded)
+                    pts = [
+                        QPointF(cx - hw, cy - hh),
+                        QPointF(cx + hw, cy - hh),
+                        QPointF(cx, cy + hh),
+                    ]
                 else:
-                    # Solid circle
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(QBrush(self._accent))
+                    # ▶ right-pointing (collapsed)
+                    pts = [
+                        QPointF(cx - hh, cy - hw),
+                        QPointF(cx + hh, cy),
+                        QPointF(cx - hh, cy + hw),
+                    ]
 
-                painter.drawEllipse(rect)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(self._accent))
+                painter.drawPolygon(QPolygonF(pts))
                 painter.restore()
                 return
         if element == QStyle.PrimitiveElement.PE_IndicatorArrowDown:

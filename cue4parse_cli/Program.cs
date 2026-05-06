@@ -237,7 +237,8 @@ internal static class Program
             Console.WriteLine("Replies are emitted to stdout as one JSON object per line.");
             Console.WriteLine("Commands: init, browse, export, export_folder, inspect,");
             Console.WriteLine("          list_exports, get_props, scan_wwise_events,");
-            Console.WriteLine("          export_wwise_audio, rebuild_wem_cache, cancel, quit");
+            Console.WriteLine("          scan_types, export_wwise_audio, rebuild_wem_cache,");
+            Console.WriteLine("          cancel, quit");
             return;
         }
 
@@ -325,6 +326,9 @@ internal static class Program
                         break;
                     case "scan_wwise_events":
                         await RunExportWithCancelSupport(reader, () => HandleScanWwiseEvents(cmd));
+                        break;
+                    case "scan_types":
+                        await RunExportWithCancelSupport(reader, () => HandleScanTypes(cmd));
                         break;
                     case "export_wwise_audio":
                         await RunExportWithCancelSupport(reader, () => HandleExportWwiseAudio(cmd));
@@ -458,6 +462,12 @@ internal static class Program
                         // Queue for after export — multiple get_props calls
                         // during a long export must all be honored, in order.
                         _pendingGetProps.Enqueue(subCmd);
+                        break;
+                    case "scan_types":
+                        // Heuristic scan is fast (<1 s); run it inline so it
+                        // is not silently dropped when it arrives during a
+                        // concurrent wwise scan or export.
+                        HandleScanTypes(subCmd);
                         break;
                     default:
                         break; // Other commands wait until export finishes
@@ -1791,6 +1801,90 @@ internal static class Program
                 error = errMsg
             });
         }
+    }
+
+    // ─── Scan Types (bulk-walk every package and emit its export types) ─
+    /// <summary>
+    /// Walk every .uasset/.umap/.upk in the mounted provider and classify each
+    /// using path/filename heuristics (no package loading, no I/O). Finishes
+    /// in under a second for any game size. Cancelable between batches.
+    /// </summary>
+    private static void HandleScanTypes(JObject cmd)
+    {
+        EnsureProvider();
+
+        List<string> packagePaths;
+        try
+        {
+            // Snapshot the dictionary before filtering so concurrent browse
+            // commands cannot invalidate the enumerator mid-scan.
+            packagePaths = _provider!.Files
+                .ToArray()
+                .Select(f => f.Value?.Path)
+                .Where(p => !string.IsNullOrEmpty(p))
+                .Cast<string>()
+                .Where(p =>
+                {
+                    var lower = p.ToLowerInvariant();
+                    return lower.EndsWith(".uasset") || lower.EndsWith(".umap") || lower.EndsWith(".upk");
+                })
+                .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            // Surface the failure to Python so the bar hides and the user sees an error.
+            Respond(new { type = "error", message = $"scan_types enumeration failed: {SanitizeMessage(ex.Message)}" });
+            Respond(new { type = "types_scan_batch", entries = Array.Empty<object>(), final = true, error_count = 1, total_packages = 0 });
+            return;
+        }
+
+        var total = packagePaths.Count;
+        Respond(new { type = "types_scan_progress", current = 0, total });
+
+        const int BatchSize = 1000;
+        const int ProgressInterval = 500;
+        var batch = new List<object>(BatchSize);
+        var processed = 0;
+
+        try
+        {
+            foreach (var path in packagePaths)
+            {
+                if (_cts.IsCancellationRequested) break;
+
+                var assetType = ClassifyAssetType(path);
+                var name = Path.GetFileNameWithoutExtension(path) ?? "";
+                batch.Add(new
+                {
+                    path,
+                    exports = new[] { new { name, export_type = assetType } },
+                });
+                processed++;
+
+                if (processed % ProgressInterval == 0)
+                    Respond(new { type = "types_scan_progress", current = processed, total });
+
+                if (batch.Count >= BatchSize)
+                {
+                    Respond(new { type = "types_scan_batch", entries = batch.ToArray(), final = false });
+                    batch.Clear();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Respond(new { type = "warning", message = $"scan_types aborted at {processed}/{total}: {SanitizeMessage(ex.Message)}" });
+        }
+
+        Respond(new
+        {
+            type = "types_scan_batch",
+            entries = batch.ToArray(),
+            final = true,
+            error_count = 0,
+            total_packages = processed,
+        });
     }
 
     // ─── Get Props (full JSON content of a uasset) ────────────────────

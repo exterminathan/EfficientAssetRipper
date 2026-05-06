@@ -342,3 +342,49 @@ def test_utf8_round_trip_through_dispatch(unpacker_with_stub, qtbot):
         proc.feed_chunk(raw)
     assert sig.args[0] == "/Game/サウンド"
     assert sig.args[1][0]["name"] == "音乐.uasset"
+
+
+# ---------------------------------------------------------------------------
+# scan_types — bulk type-cache walk
+# ---------------------------------------------------------------------------
+
+def test_scan_types_command_writes_correct_ndjson(unpacker_with_stub):
+    up, proc = unpacker_with_stub
+    up.scan_types()
+    assert proc.write_log
+    payload = json.loads(proc.write_log[0].decode("utf-8").strip())
+    assert payload == {"cmd": "scan_types"}
+
+
+def test_types_scan_progress_signal(unpacker_with_stub, qtbot):
+    up, proc = unpacker_with_stub
+    with qtbot.waitSignal(up.types_scan_progress, timeout=1000) as sig:
+        proc.feed(json.dumps({"type": "types_scan_progress", "current": 250, "total": 1000}))
+    assert sig.args == [250, 1000]
+
+
+def test_types_scan_batch_intermediate_does_not_emit_done(unpacker_with_stub, qtbot):
+    up, proc = unpacker_with_stub
+    payload = {
+        "type": "types_scan_batch",
+        "entries": [{"path": "/G/A.uasset", "exports": [{"name": "x", "export_type": "Texture2D"}]}],
+        "final": False,
+    }
+    with qtbot.waitSignal(up.types_scan_batch, timeout=1000) as sig:
+        proc.feed(json.dumps(payload))
+    assert sig.args[1] is False
+    assert sig.args[0][0]["path"] == "/G/A.uasset"
+
+
+def test_types_scan_batch_final_emits_done_with_counts(unpacker_with_stub, qtbot):
+    up, proc = unpacker_with_stub
+    payload = {
+        "type": "types_scan_batch",
+        "entries": [],
+        "final": True,
+        "error_count": 3,
+        "total_packages": 4200,
+    }
+    with qtbot.waitSignal(up.types_scan_done, timeout=1000) as done_sig:
+        proc.feed(json.dumps(payload))
+    assert done_sig.args == [3, 4200]

@@ -31,6 +31,9 @@ class UnpackerProcess(QObject):
     props_result = Signal(str, list)          # path, list[dict{name, export_type, properties}]
     exports_listed = Signal(str, list)        # path, list[dict{name, export_type, outer}]
     wwise_scan_result = Signal(dict)          # full scan result dict
+    types_scan_progress = Signal(int, int)    # current, total
+    types_scan_batch = Signal(list, bool)     # entries, is_final
+    types_scan_done = Signal(int, int)        # error_count, total_packages
     warning = Signal(str)                     # warning message
     version_warning = Signal(str, str)        # (message, current_ue_version) — likely UE-version mismatch
     version_detected = Signal(str, str, str)  # (suggested_version, source_exe, file_version) or (None, None, reason)
@@ -162,6 +165,14 @@ class UnpackerProcess(QObject):
         """Scan AkAudioEvent assets in WWiseAudio/Events for media mappings."""
         self._send({"cmd": "scan_wwise_events"})
 
+    def scan_types(self) -> None:
+        """Bulk-scan every package's export types for the type cache.
+
+        Streams `types_scan_progress` and `types_scan_batch` messages; the
+        final batch carries `final=True` and triggers `types_scan_done`.
+        """
+        self._send({"cmd": "scan_types"})
+
     def list_exports(self, vfs_path: str) -> None:
         """Request the list of exports inside a package (.upk, .uasset, .umap)."""
         self._send({"cmd": "list_exports", "path": vfs_path})
@@ -282,6 +293,22 @@ class UnpackerProcess(QObject):
 
         elif msg_type == "wwise_scan_result":
             self.wwise_scan_result.emit(msg)
+
+        elif msg_type == "types_scan_progress":
+            self.types_scan_progress.emit(
+                msg.get("current", 0),
+                msg.get("total", 0),
+            )
+
+        elif msg_type == "types_scan_batch":
+            entries = msg.get("entries", []) or []
+            is_final = bool(msg.get("final"))
+            self.types_scan_batch.emit(entries, is_final)
+            if is_final:
+                self.types_scan_done.emit(
+                    int(msg.get("error_count", 0)),
+                    int(msg.get("total_packages", 0)),
+                )
 
         elif msg_type == "warning":
             self.warning.emit(msg.get("message", ""))
