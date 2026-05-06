@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-05-06
+
+Unpacker performance and ergonomics: type-cache-backed asset filtering,
+visual type indicators, and dropdown polish.
+
+### Added
+- Type cache + heuristic scan — asset-type filter resolves without
+  re-walking the archive, large trees stay responsive.
+- Visual type indicators on Unpacker rows (mesh / texture / audio / etc.).
+
+### Changed
+- Headless test suite — Qt tests run with no visible windows.
+
+### Fixed
+- Unpacker filter dropdowns no longer get stuck or mismatch their state.
+
 ## [0.8.6] - 2026-05-05
 
 Mesh preview tab plus type-aware right-click previews across the Unpacker
