@@ -115,9 +115,11 @@ class _WelcomePage(QWizardPage):
         layout.addWidget(intro)
 
         legal = QLabel(
-            "<b>Legal:</b> for use only on games you legally own. "
-            'See <a href="https://github.com/exterminathan/EfficientAssetRipper#-legal">'
-            "the README</a> for the full disclaimer."
+            "<b>Legal:</b> Using or distributing the output from this software "
+            "may be against copyright legislation in your jurisdiction — you "
+            "are responsible for ensuring you're not breaking any laws. "
+            'See the <a href="https://github.com/exterminathan/EfficientAssetRipper#-legal">'
+            "README</a> for the full disclaimer."
         )
         legal.setOpenExternalLinks(True)
         legal.setWordWrap(True)

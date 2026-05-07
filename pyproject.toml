@@ -1,7 +1,7 @@
 [project]
 name = "efficient-asset-ripper"
 version = "0.5.0"
-description = "Unpack any UE4/5 game files and easily export them to Blender. Includes utility tools for previewing textures, combining models, and other useful features."
+description = "Asset extraction tool for Unreal Engine 4/5 games — unpacks .pak/.utoc archives via CUE4Parse and exports meshes and materials to Blender."
 requires-python = ">=3.11,<3.13"
 
 [tool.pytest.ini_options]

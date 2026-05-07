@@ -528,10 +528,12 @@ class MainWindow(QMainWindow):
             self,
             "About EfficientAssetRipper",
             f"<h3>EfficientAssetRipper v{__version__}</h3>"
-            "<p>Unpack any UE4/5 game files and easily export them to "
-            "Blender. Includes utility tools for previewing textures, "
-            "combining models, and other useful features.</p>"
-            "<p>Released under the MIT License.</p>"
+            "<p>An asset extraction tool for Unreal Engine 4 and 5 games, "
+            "built on CUE4Parse with an automated Blender export pipeline.</p>"
+            "<p>Licensed under the MIT License. Not affiliated with Epic Games, Inc. "
+            "Using or distributing extracted output may be against copyright "
+            "legislation in your jurisdiction — you are responsible for "
+            "ensuring you're not breaking any laws.</p>"
             f"{update_html}"
             '<p><a href="https://github.com/exterminathan/EfficientAssetRipper">'
             "github.com/exterminathan/EfficientAssetRipper</a></p>",

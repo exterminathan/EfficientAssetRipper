@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Rewrote legal language across README, in-app About dialog, and first-run
+  wizard for clarity around jurisdiction, responsibility, and Unreal Engine
+  trademarks. No license change.
+
 ## [0.8.7] - 2026-05-06
 
 Unpacker performance and ergonomics: type-cache-backed asset filtering,

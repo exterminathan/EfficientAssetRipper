@@ -6,9 +6,15 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![Built with PySide6 + .NET 8](https://img.shields.io/badge/built%20with-PySide6%20%2B%20.NET%208-512bd4)](#dependencies)
 
-> Unpack any UE4/5 game files and easily export them to Blender. Includes
-> utility tools for previewing textures, combining models, and other
-> useful features.
+> EfficientAssetRipper is an asset extraction tool for Unreal Engine 4 and 5
+> games that uses CUE4Parse as its core parsing library, with robust support
+> for the latest UE4 and UE5 archive formats. It pairs a modern PySide6
+> desktop interface with an automated Blender export pipeline and a
+> comprehensive set of utility tools for previewing textures, combining
+> models, and inspecting game packages.
+>
+> EfficientAssetRipper is actively maintained and welcomes contributions
+> and feedback.
 
 <!-- Demo GIF — record locally with ScreenToGif/LICEcap, drop in docs/demo.gif -->
 ![EfficientAssetRipper demo](docs/demo.gif)
@@ -19,12 +25,15 @@
 
 ## ⚖️ Legal
 
-**For use only on games you legally own.** This tool extracts assets from
-Unreal Engine games for personal study, modding, and educational purposes.
-Respect publisher EULAs and copyright law — extracted assets are still owned
-by their original publishers and must not be redistributed. The author is
-not affiliated with any game studio mentioned in this project, and provides
-this software with no warranty.
+EfficientAssetRipper is licensed under the MIT License.
+
+Please be aware that using or distributing the output from this software may
+be against copyright legislation in your jurisdiction. You are responsible
+for ensuring that you're not breaking any laws.
+
+This software is not sponsored by or affiliated with Epic Games, Inc. or its
+affiliates. "Unreal" and "Unreal Engine" are trademarks or registered
+trademarks of Epic Games, Inc. in the United States and elsewhere.
 
 ---
 
@@ -464,8 +473,5 @@ Bug reports and feature ideas: please use the
 
 Released under the MIT License — see [LICENSE](LICENSE).
 
-EfficientAssetRipper is provided **as-is, with no warranty**, for use only on
-games you legally own. Extracted assets remain the property of their original
-publishers; respect EULAs, copyright law, and do not redistribute extracted
-content. The author is not affiliated with any game studio mentioned in this
-project.
+See the [Legal](#-legal) section above for the disclaimer regarding
+jurisdiction, responsibility, and trademarks.

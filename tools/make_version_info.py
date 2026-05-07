@@ -52,7 +52,7 @@ VSVersionInfo(
             StringStruct(u'FileDescription', u'EfficientAssetRipper - Unpack UE4/5 game files and export to Blender'),
             StringStruct(u'FileVersion', u'{ver_str}'),
             StringStruct(u'InternalName', u'EfficientAssetRipper'),
-            StringStruct(u'LegalCopyright', u'MIT License'),
+            StringStruct(u'LegalCopyright', u'Copyright © 2026 Nathan Shturm. MIT License.'),
             StringStruct(u'OriginalFilename', u'EfficientAssetRipper.exe'),
             StringStruct(u'ProductName', u'EfficientAssetRipper'),
             StringStruct(u'ProductVersion', u'{ver_str}'),
