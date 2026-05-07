@@ -245,3 +245,80 @@ def test_keyword_fallback_skipped_when_no_reference_path(
         reference_path=None,
     )
     assert res.keyword_fallback_used == []
+
+
+def test_keyword_fallback_skipped_when_main_pass_resolved_anything(
+    make_fake_sdk, tmp_path
+):
+    """An Obduction-style spec — main pass resolves base_color + normal via
+    regex_suffixes; a wide folder full of unrelated PBR maps must NOT be
+    drained into the empty roughness/metallic/etc slots.
+    """
+    presets = {
+        "version": 1,
+        "ignore_textures": [],
+        "ignore_patterns": [],
+        "presets": {
+            "default_pbr": {
+                "enable_keyword_fallback": True,
+                "priority_order": ["base_color", "normal", "roughness", "metallic"],
+                "texture_slots": {
+                    "base_color": {
+                        "regex_suffixes": ["[-_]DIFFR?$"],
+                        "colorspace": "sRGB",
+                        "wiring": {"type": "direct", "target_input": "Base Color"},
+                    },
+                    "normal": {
+                        "regex_suffixes": ["[-_]NRM$"],
+                        "colorspace": "Non-Color",
+                        "wiring": {"type": "normal_map"},
+                    },
+                    "roughness": {
+                        "suffixes": ["_R", "_Roughness"],
+                        "colorspace": "Non-Color",
+                        "wiring": {"type": "direct", "target_input": "Roughness"},
+                    },
+                    "metallic": {
+                        "suffixes": ["_M", "_Metallic"],
+                        "colorspace": "Non-Color",
+                        "wiring": {"type": "direct", "target_input": "Metallic"},
+                    },
+                },
+            }
+        },
+        "material_overrides": {},
+    }
+
+    folder = tmp_path / "Game" / "Content" / "Textures"
+    folder.mkdir(parents=True)
+    diffr = folder / "Clay-Light-Diffr.tga"
+    nrm = folder / "Clay-Light-NRM.tga"
+    # Unrelated textures that the keyword scorer would happily latch onto.
+    junk_rough = folder / "Unrelated_Roughness.tga"
+    junk_metal = folder / "Unrelated_Metallic.tga"
+    for f in (diffr, nrm, junk_rough, junk_metal):
+        f.write_bytes(b"\0")
+
+    psk = tmp_path / "Game" / "Content" / "Meshes" / "ClayRing.pskx"
+    psk.parent.mkdir(parents=True)
+
+    sdk = make_fake_sdk(
+        textures={
+            "clay-light-diffr": [diffr],
+            "clay-light-nrm": [nrm],
+        },
+        folder_textures={str(folder): [diffr, nrm, junk_rough, junk_metal]},
+    )
+
+    res = resolve_textures(
+        texture_names=["Clay-Light-Diffr", "Clay-Light-NRM"],
+        presets_data=presets,
+        sdk=sdk,
+        material_name="ClayRing",
+        reference_path=psk,
+    )
+
+    slots = {t.slot: t.path for t in res.resolved}
+    assert slots == {"base_color": diffr, "normal": nrm}
+    # Crucially, no fallback contamination from Unrelated_Roughness / _Metallic.
+    assert res.keyword_fallback_used == []

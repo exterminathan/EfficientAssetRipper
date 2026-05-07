@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from PySide6.QtCore import Qt, QModelIndex, Signal
-from PySide6.QtGui import QMouseEvent, QWheelEvent
+from PySide6.QtGui import QAction, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLineEdit,
+    QMenu,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+
+LAZY_PLACEHOLDER = "__placeholder__"
 
 
 class PathPicker(QWidget):
@@ -70,7 +76,7 @@ class PathPicker(QWidget):
 
 
 class ZoomableTree(QTreeWidget):
-    """QTreeWidget that supports Ctrl+Scroll zoom and Shift+Click range checkbox toggling."""
+    """QTreeWidget that supports Ctrl+Scroll zoom, Shift+Click range checkbox toggling, and Alt+Click recursive expand/collapse."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -78,15 +84,26 @@ class ZoomableTree(QTreeWidget):
         if self._base_font_size <= 0:
             self._base_font_size = 10
         self._last_clicked_item: QTreeWidgetItem | None = None
+        self._lazy_load_callback: Callable[[QTreeWidgetItem], None] | None = None
 
-    # -- Shift+Click range checkbox toggling --
+    def set_lazy_load_callback(self, cb: Callable[[QTreeWidgetItem], None] | None) -> None:
+        """Wire a callback so Alt+click on a folder with placeholder children
+        triggers a single browse() rather than infinite recursion."""
+        self._lazy_load_callback = cb
+
+    # -- Shift+Click range checkbox toggling + Alt+Click recursive toggle --
 
     def mousePressEvent(self, event: QMouseEvent):
         item = self.itemAt(event.pos())
+        mods = event.modifiers()
+        is_left = event.button() == Qt.MouseButton.LeftButton
+        is_shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        is_alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+
         if (
             item is not None
-            and event.button() == Qt.MouseButton.LeftButton
-            and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            and is_left
+            and is_shift
             and bool(item.flags() & Qt.ItemFlag.ItemIsUserCheckable)
             and self._last_clicked_item is not None
             and self._last_clicked_item is not item
@@ -111,9 +128,101 @@ class ZoomableTree(QTreeWidget):
             event.accept()
             return
 
+        if (
+            item is not None
+            and is_left
+            and is_alt
+            and not is_shift
+            and self._is_expandable(item)
+        ):
+            self.setCurrentItem(item)
+            if item.isExpanded():
+                self.collapse_recursive(item)
+            else:
+                self.expand_recursive(item)
+            self._last_clicked_item = item
+            event.accept()
+            return
+
         if item is not None:
             self._last_clicked_item = item
         super().mousePressEvent(event)
+
+    @staticmethod
+    def _is_expandable(item: QTreeWidgetItem) -> bool:
+        return item.childCount() > 0
+
+    @staticmethod
+    def _is_lazy_placeholder(item: QTreeWidgetItem) -> bool:
+        if item.childCount() != 1:
+            return False
+        child = item.child(0)
+        return child.data(0, Qt.ItemDataRole.UserRole) == LAZY_PLACEHOLDER
+
+    def expand_recursive(self, item: QTreeWidgetItem) -> None:
+        """Expand item and all descendants. Stops at unloaded lazy boundaries
+        (a single placeholder triggers one browse() and returns)."""
+        if not self._is_expandable(item):
+            return
+        if self._is_lazy_placeholder(item):
+            item.setExpanded(True)
+            cb = self._lazy_load_callback
+            if cb is not None:
+                cb(item)
+            return
+        item.setExpanded(True)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if self._is_expandable(child):
+                self.expand_recursive(child)
+
+    def collapse_recursive(self, item: QTreeWidgetItem) -> None:
+        """Collapse item and all descendants."""
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child.childCount() > 0:
+                self.collapse_recursive(child)
+        item.setExpanded(False)
+
+    def expand_all_visible(self) -> None:
+        """Expand every non-hidden item; skips filtered-out rows."""
+        root = self.invisibleRootItem()
+        for i in range(root.childCount()):
+            self._expand_visible_walk(root.child(i))
+
+    def _expand_visible_walk(self, item: QTreeWidgetItem) -> None:
+        if item.isHidden():
+            return
+        if item.childCount() > 0 and not self._is_lazy_placeholder(item):
+            item.setExpanded(True)
+            for i in range(item.childCount()):
+                self._expand_visible_walk(item.child(i))
+        elif self._is_lazy_placeholder(item):
+            item.setExpanded(True)
+
+    def collapse_all_visible(self) -> None:
+        root = self.invisibleRootItem()
+        for i in range(root.childCount()):
+            self._collapse_visible_walk(root.child(i))
+
+    def _collapse_visible_walk(self, item: QTreeWidgetItem) -> None:
+        for i in range(item.childCount()):
+            self._collapse_visible_walk(item.child(i))
+        item.setExpanded(False)
+
+    def expand_selected(self, recursive: bool = True) -> None:
+        for it in self.selectedItems():
+            if recursive:
+                self.expand_recursive(it)
+            else:
+                it.setExpanded(True)
+
+    def collapse_selected(self, recursive: bool = True) -> None:
+        for it in self.selectedItems():
+            if recursive:
+                self.collapse_recursive(it)
+            else:
+                it.setExpanded(False)
 
     def _get_visible_items_between(
         self, item_a: QTreeWidgetItem, item_b: QTreeWidgetItem
@@ -166,6 +275,36 @@ class ZoomableTree(QTreeWidget):
             event.accept()
         else:
             super().wheelEvent(event)
+
+
+def add_tree_expand_actions(menu: QMenu, tree: ZoomableTree, item: QTreeWidgetItem | None) -> None:
+    """Append Expand/Collapse All + Selected entries to a context menu.
+
+    Used by all three left-tab trees. Selected variants are only enabled when
+    the right-clicked item itself is expandable.
+    """
+    has_selection = item is not None and item.childCount() > 0
+
+    if menu.actions():
+        menu.addSeparator()
+
+    expand_all = QAction("Expand All", menu)
+    expand_all.triggered.connect(tree.expand_all_visible)
+    menu.addAction(expand_all)
+
+    collapse_all = QAction("Collapse All", menu)
+    collapse_all.triggered.connect(tree.collapse_all_visible)
+    menu.addAction(collapse_all)
+
+    expand_selected = QAction("Expand Selected", menu)
+    expand_selected.setEnabled(has_selection)
+    expand_selected.triggered.connect(lambda: tree.expand_selected(recursive=True))
+    menu.addAction(expand_selected)
+
+    collapse_selected = QAction("Collapse Selected", menu)
+    collapse_selected.setEnabled(has_selection)
+    collapse_selected.triggered.connect(lambda: tree.collapse_selected(recursive=True))
+    menu.addAction(collapse_selected)
 
 
 class CollapsibleSection(QWidget):

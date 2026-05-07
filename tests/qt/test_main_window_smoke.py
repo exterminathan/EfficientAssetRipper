@@ -24,8 +24,14 @@ def test_main_window_constructs_with_default_config(main_window):
     assert main_window.windowTitle().startswith("EfficientAssetRipper")
 
 
-def test_main_window_creates_profile_bar(main_window):
-    assert main_window._profile_bar is not None
+def test_main_window_has_profiles_menu(main_window):
+    """Profile selection lives in the menu bar — not a header bar widget."""
+    titles = [
+        a.menu().title().replace("&", "")
+        for a in main_window.menuBar().actions() if a.menu()
+    ]
+    assert "Profiles" in titles
+    assert main_window._profiles_menu is not None
 
 
 def test_main_window_creates_queue_panel(main_window):
@@ -44,6 +50,7 @@ def test_menu_actions_present(main_window):
         for a in main_window.menuBar().actions() if a.menu()
     ]
     assert "File" in menu_titles
+    assert "Profiles" in menu_titles
     assert "Tools" in menu_titles
     assert "Help" in menu_titles
     assert "Window" in menu_titles
@@ -73,18 +80,26 @@ def test_status_bar_initial_message(main_window):
     )
 
 
-def test_left_tabs_have_browser_picker_unpacker(main_window):
-    titles = [main_window._left_tabs.tabText(i) for i in range(main_window._left_tabs.count())]
-    assert "Asset Browser" in titles
-    assert "PSK Picker" in titles
-    assert "Unpacker" in titles
+def test_left_docks_have_browser_picker_unpacker(main_window):
+    """Each left-side panel exists as a QDockWidget with a stable objectName."""
+    object_names = {dock.objectName() for dock in main_window._docks.values()}
+    assert {"dock_asset_browser", "dock_psk_picker", "dock_unpacker"}.issubset(object_names)
 
 
-def test_right_tabs_have_queue_log_and_combiner(main_window):
-    titles = [main_window._right_tabs.tabText(i) for i in range(main_window._right_tabs.count())]
-    assert "Queue / Log" in titles
-    # Tab is renamed when Blender is unavailable in the test env.
-    assert any(t.startswith("Blend Combiner") for t in titles)
+def test_right_docks_have_queue_log_and_combiner(main_window):
+    object_names = {dock.objectName() for dock in main_window._docks.values()}
+    assert "dock_queue_log" in object_names
+    assert "dock_blend_combiner" in object_names
+
+
+def test_docks_are_not_floatable(main_window):
+    """In-window docking only — tearing out as an OS window is intentionally disabled."""
+    from PySide6.QtWidgets import QDockWidget
+    floatable = QDockWidget.DockWidgetFeature.DockWidgetFloatable
+    for dock in main_window._docks.values():
+        assert not bool(dock.features() & floatable), (
+            f"{dock.objectName()} has DockWidgetFloatable enabled"
+        )
 
 
 def test_is_busy_false_initially(main_window):

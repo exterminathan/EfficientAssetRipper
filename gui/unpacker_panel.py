@@ -14,26 +14,21 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSplitter,
     QStyle,
-    QTableWidget,
-    QTableWidgetItem,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from gui.theme import install_combo_click_to_popup
-from gui.widgets import ZoomableTree
+from gui.widgets import CollapsibleSection, ZoomableTree, add_tree_expand_actions
 
 import config
 from core import type_cache as type_cache_mod
@@ -81,6 +76,7 @@ class UnpackerPanel(QWidget):
     tga_preview = Signal(str)           # local file path for TGA/image Preview tab
     mesh_preview = Signal(str)          # local .psk path for Mesh Preview tab
     version_mismatch = Signal(str)      # banner text for the log viewer
+    aes_keys_required = Signal(int, list)   # (unmounted_count, [{"name", "guid"}, ...]) — host opens prompt dialog
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -88,8 +84,15 @@ class UnpackerPanel(QWidget):
         self._mounted = False
         self._exporting = False
         self._export_output_dir = ""
-        self._ue_version_user_set = False  # track if user manually changed the version dropdown
         self._suppress_export_error_popup = False  # user opted to skip popups for the current CLI session
+        # Snapshot of AES keys owned by the active profile. The Unpacker no
+        # longer has its own editor — these arrive via load_from_profile and
+        # are mutated only by the AES prompt (which writes back via the
+        # ProfileManager and reissues load_from_profile).
+        self._aes_keys: list[dict] = []
+        # Single-shot guard so a remount triggered by the AES prompt itself
+        # doesn't reopen the prompt if the new keys are still wrong.
+        self._aes_prompt_pending = False
 
         # Hand-off tracking. ``_pre_export_psks`` snapshots ``path → mtime``
         # for every PSK/PSKX in the output directory at export-start. After
@@ -248,7 +251,6 @@ class UnpackerPanel(QWidget):
         the user must opt in by clicking Mount Archives once.
         """
         was_mounted = self._mounted
-        self._ue_version_user_set = False
         self._suppress_export_error_popup = False
         self._game_dir_edit.setText(profile.get("game_dir", ""))
 
@@ -266,14 +268,8 @@ class UnpackerPanel(QWidget):
         self._mappings_edit.setText(profile.get("mappings_path", ""))
         self._output_dir_edit.setText(profile.get("unpack_output_dir", ""))
 
-        # AES keys
-        self._keys_table.setRowCount(0)
-        for k in profile.get("aes_keys", []):
-            row = self._keys_table.rowCount()
-            self._keys_table.insertRow(row)
-            self._keys_table.setItem(row, 0, QTableWidgetItem(k.get("label", "")))
-            self._keys_table.setItem(row, 1, QTableWidgetItem(k.get("guid", "")))
-            self._keys_table.setItem(row, 2, QTableWidgetItem(k.get("key", "")))
+        # AES keys are owned by the profile; we just snapshot them.
+        self._aes_keys = list(profile.get("aes_keys", []) or [])
 
         # Clear mounted state — user must re-mount after switching profiles
         if self._mounted:
@@ -325,97 +321,51 @@ class UnpackerPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # We'll use a splitter so the mount/keys section vs the tree are resizable
-        self._main_splitter = QSplitter(Qt.Orientation.Vertical)
+        # ── Top toolbar: read-only mount summary + Mount button ───────
+        # Editing of game folder / UE version / mappings lives in the
+        # Manage Profiles dialog only. This strip just shows what the
+        # active profile is and lets the user kick off a mount.
+        toolbar = QFrame()
+        toolbar.setFrameShape(QFrame.Shape.NoFrame)
+        toolbar.setProperty("cssClass", "toolbar")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 4)
 
-        # ── Top section (mount + keys) ────────────────────────────────
-        top_widget = QWidget()
-        top_layout = QVBoxLayout(top_widget)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-
-        # ── Mount controls ────────────────────────────────────────────
-        mount_section = QGroupBox("Mount Archives")
-        mount_layout = QVBoxLayout()
-
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Game folder:"))
+        toolbar_layout.addWidget(QLabel("Game folder:"))
         self._game_dir_edit = QLineEdit()
-        self._game_dir_edit.setPlaceholderText("Path to game content folder (.pak, .upk, or loose content files)")
-        row1.addWidget(self._game_dir_edit)
-        self._browse_game_btn = QPushButton("Browse...")
-        self._browse_game_btn.setFixedWidth(80)
-        self._browse_game_btn.clicked.connect(self._browse_game_dir)
-        row1.addWidget(self._browse_game_btn)
-        mount_layout.addLayout(row1)
+        self._game_dir_edit.setPlaceholderText("(set via Manage Profiles)")
+        self._game_dir_edit.setReadOnly(True)
+        self._game_dir_edit.setProperty("cssClass", "readonly")
+        self._game_dir_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        toolbar_layout.addWidget(self._game_dir_edit, 3)
 
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("UE Version:"))
+        toolbar_layout.addWidget(QLabel("UE:"))
         self._ue_version_combo = QComboBox()
-        self._ue_version_combo.setEditable(True)
+        self._ue_version_combo.setEditable(False)
         self._ue_version_combo.addItems(_UE_VERSIONS)
-        install_combo_click_to_popup(self._ue_version_combo)
         saved_ver = config.get("unpack_ue_version")
         if saved_ver in _UE_VERSIONS:
             self._ue_version_combo.setCurrentText(saved_ver)
         else:
             self._ue_version_combo.setCurrentText("GAME_UE5_4")
-        self._ue_version_combo.setFixedWidth(200)
-        row2.addWidget(self._ue_version_combo)
+        self._ue_version_combo.setEnabled(False)
+        self._ue_version_combo.setFixedWidth(180)
+        toolbar_layout.addWidget(self._ue_version_combo)
 
-        row2.addWidget(QLabel("Mappings:"))
+        # Mappings path is sourced from the profile and consumed by
+        # _mount_archives — kept as a hidden QLineEdit for state-storage
+        # compatibility, never shown in the toolbar.
         self._mappings_edit = QLineEdit()
-        self._mappings_edit.setPlaceholderText("Optional .usmap file")
-        row2.addWidget(self._mappings_edit)
-        self._browse_mappings_btn = QPushButton("...")
-        self._browse_mappings_btn.setFixedWidth(30)
-        self._browse_mappings_btn.clicked.connect(self._browse_mappings)
-        row2.addWidget(self._browse_mappings_btn)
+        self._mappings_edit.setVisible(False)
 
-        row2.addStretch()
+        toolbar_layout.addStretch()
+
         self._mount_btn = QPushButton("Mount Archives")
         self._mount_btn.setProperty("cssClass", "success")
         self._mount_btn.clicked.connect(self._mount_archives)
-        row2.addWidget(self._mount_btn)
-        mount_layout.addLayout(row2)
+        toolbar_layout.addWidget(self._mount_btn)
 
-        # ── AES Keys (inside mount section) ───────────────────────────
-        keys_label = QLabel("AES Keys")
-
-        mount_layout.addWidget(keys_label)
-
-        self._keys_table = QTableWidget()
-        self._keys_table.setColumnCount(3)
-        self._keys_table.setHorizontalHeaderLabels(["Label", "GUID", "Key (hex)"])
-        self._keys_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self._keys_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        self._keys_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self._keys_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._keys_table.verticalHeader().setVisible(False)
-        self._keys_table.setMaximumHeight(150)
-        mount_layout.addWidget(self._keys_table)
-
-        keys_btns = QHBoxLayout()
-        add_key_btn = QPushButton("Add Key")
-        add_key_btn.clicked.connect(self._add_key_row)
-        keys_btns.addWidget(add_key_btn)
-        remove_key_btn = QPushButton("Remove Selected")
-        remove_key_btn.clicked.connect(self._remove_selected_key)
-        keys_btns.addWidget(remove_key_btn)
-        keys_btns.addStretch()
-        mount_layout.addLayout(keys_btns)
-
-        mount_section.setLayout(mount_layout)
-        top_layout.addWidget(mount_section)
-
-        # Load saved keys
-        self._load_keys_from_config()
-
-        self._main_splitter.addWidget(top_widget)
-
-        # ── Bottom section (search + tree + export + progress) ─────────
-        bottom_widget = QWidget()
-        bottom_layout = QVBoxLayout(bottom_widget)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(toolbar)
 
         # ── Search row ────────────────────────────────────────────────
         search_row = QHBoxLayout()
@@ -423,8 +373,7 @@ class UnpackerPanel(QWidget):
         self._search.setPlaceholderText("Filter tree by name...")
         self._search.textChanged.connect(self._filter_debounce.start)
         search_row.addWidget(self._search, 1)
-
-        bottom_layout.addLayout(search_row)
+        layout.addLayout(search_row)
 
         # ── Category filter checkboxes (directly under search bar) ───
         cat_row = QHBoxLayout()
@@ -446,11 +395,11 @@ class UnpackerPanel(QWidget):
             cat_row.addWidget(cb)
             self._cat_checkboxes[cat_id] = cb
         cat_row.addStretch()
-        bottom_layout.addLayout(cat_row)
+        layout.addLayout(cat_row)
 
         # ── Mount info (middle area) ──────────────────────────────────
         self._mount_info = QLabel("")
-        bottom_layout.addWidget(self._mount_info)
+        layout.addWidget(self._mount_info)
 
         # ── Type-scan progress bar (only visible while background scan runs) ──
         self._type_scan_bar = QProgressBar()
@@ -458,23 +407,36 @@ class UnpackerPanel(QWidget):
         self._type_scan_bar.setFormat("Scanning asset types: %v / %m packages")
         self._type_scan_bar.setMaximumHeight(18)
         self._type_scan_bar.setVisible(False)
-        bottom_layout.addWidget(self._type_scan_bar)
+        layout.addWidget(self._type_scan_bar)
 
         # ── VFS Tree ──────────────────────────────────────────────────
         self._tree = ZoomableTree()
         self._tree.setHeaderLabels(["Name"])
+        # Single-column view — the header strip is dead space, hide it.
+        self._tree.setHeaderHidden(True)
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.itemCollapsed.connect(self._on_item_collapsed)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._tree.itemSelectionChanged.connect(self._maybe_expand_export_section)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
         self._tree.setEnabled(False)
-        bottom_layout.addWidget(self._tree, stretch=1)
+        layout.addWidget(self._tree, stretch=1)
 
-        # ── Export controls ───────────────────────────────────────────
-        export_group = QGroupBox("Export")
-        export_layout = QVBoxLayout(export_group)
+        # ── Progress bar (always visible above the export panel) ─────
+        self._progress = QProgressBar()
+        self._progress.setTextVisible(True)
+        self._progress.setFormat("%v / %m (%p%)")
+        layout.addWidget(self._progress)
+
+        self._status_label = QLabel("Not mounted")
+        layout.addWidget(self._status_label)
+
+        # ── Export controls (collapsible footer) ─────────────────────
+        # Auto-expands on first selection so users don't fish for it.
+        self._export_section = CollapsibleSection("Export", start_expanded=False)
+        export_layout = QVBoxLayout()
 
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("Mounted Folder:"))
@@ -539,20 +501,8 @@ class UnpackerPanel(QWidget):
         btn_row.addWidget(self._handoff_btn)
 
         export_layout.addLayout(btn_row)
-        bottom_layout.addWidget(export_group)
-
-        # ── Progress bar ──────────────────────────────────────────────
-        self._progress = QProgressBar()
-        self._progress.setTextVisible(True)
-        self._progress.setFormat("%v / %m (%p%)")
-        bottom_layout.addWidget(self._progress)
-
-        self._status_label = QLabel("Not mounted")
-        bottom_layout.addWidget(self._status_label)
-
-        self._main_splitter.addWidget(bottom_widget)
-        self._main_splitter.setSizes([200, 500])
-        layout.addWidget(self._main_splitter, stretch=1)
+        self._export_section.set_content_layout(export_layout)
+        layout.addWidget(self._export_section)
 
     # ------------------------------------------------------------------
     # Signal wiring
@@ -574,8 +524,6 @@ class UnpackerPanel(QWidget):
         self._unpacker.version_detected.connect(self._on_version_detected)
         self._unpacker.error.connect(self._on_error)
         self._unpacker.process_ended.connect(self._on_process_ended)
-        self._ue_version_combo.currentTextChanged.connect(self._on_ue_version_changed)
-        self._ue_version_combo.editTextChanged.connect(self._on_ue_version_changed)
 
     # ------------------------------------------------------------------
     # Tree filtering (in-place hide/show for lazy-loaded VFS)
@@ -849,14 +797,14 @@ class UnpackerPanel(QWidget):
 
         game_dir = self._game_dir_edit.text().strip()
         if not game_dir:
-            QMessageBox.warning(self, "No Game Directory", "Enter the game content directory.")
+            QMessageBox.warning(
+                self, "No Game Directory",
+                "Open Manage Profiles and set the Game folder for this profile.",
+            )
             return
 
         ue_version = self._ue_version_combo.currentText()
         config.set("unpack_ue_version", ue_version)
-
-        # Save keys to config before mounting
-        self._save_keys_to_config()
 
         self._mount_btn.setEnabled(False)
         self._status_label.setText("Starting CUE4ParseCLI...")
@@ -875,15 +823,18 @@ class UnpackerPanel(QWidget):
         mappings = self._mappings_edit.text().strip()
         self._unpacker.initialize(game_dir, aes_keys, ue_version, mappings)
 
-    @Slot(int, int, int, int, int)
+    @Slot(int, int, int, int, int, list)
     def _on_initialized(self, archive_count: int, unmounted_count: int,
-                        file_count: int, keys_submitted: int, loose_file_count: int = 0):
+                        file_count: int, keys_submitted: int,
+                        loose_file_count: int = 0,
+                        unmounted_archives: list | None = None):
         # Defensive: clamp negative counts (CLI bug shouldn't take down the GUI)
         archive_count = max(0, archive_count)
         unmounted_count = max(0, unmounted_count)
         file_count = max(0, file_count)
         keys_submitted = max(0, keys_submitted)
         loose_file_count = max(0, loose_file_count)
+        unmounted_archives = unmounted_archives or []
 
         self._mounted = True
         self._mount_btn.setEnabled(True)
@@ -910,6 +861,14 @@ class UnpackerPanel(QWidget):
         self._user_collapsed.clear()
         self._pending_filter_browses.clear()
         self._unpacker.browse("")
+
+        # Surface a key-entry prompt unless the caller is itself a remount
+        # triggered by the prompt (avoids re-prompting on a wrong-key paste).
+        if unmounted_count > 0 and not self._aes_prompt_pending:
+            self._aes_prompt_pending = True
+            self.aes_keys_required.emit(unmounted_count, list(unmounted_archives))
+        else:
+            self._aes_prompt_pending = False
 
         # Trigger WWise audio event scan (CLI returns quickly if no WWiseAudio folder)
         self._wwise_root = ""
@@ -1198,20 +1157,23 @@ class UnpackerPanel(QWidget):
 
     def _show_context_menu(self, pos):
         item = self._tree.itemAt(pos)
-        if item is None:
-            return
         self._popup_context_menu(item, self._tree.viewport().mapToGlobal(pos))
 
-    def _popup_context_menu(self, item: QTreeWidgetItem, global_pos):
+    def _popup_context_menu(self, item: QTreeWidgetItem | None, global_pos):
         """Build and show the right-click menu for *item*. Split out from
         `_show_context_menu` so tests can drive it directly without poking
         the QTreeWidget's internal hit-testing."""
-        vfs_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
-        if vfs_path == _PLACEHOLDER:
-            return
+        vfs_path = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else ""
+        is_placeholder = vfs_path == _PLACEHOLDER
+        is_folder = bool(item.data(0, Qt.ItemDataRole.UserRole + 1)) if item is not None else False
 
-        is_folder = item.data(0, Qt.ItemDataRole.UserRole + 1)
-        if is_folder:
+        # Folder rows / placeholders / blank-area clicks only get the
+        # expand/collapse helpers — there's no individual asset to act on.
+        if item is None or is_placeholder or is_folder:
+            menu = QMenu(self)
+            add_tree_expand_actions(menu, self._tree, item)
+            if menu.actions():
+                menu.exec(global_pos)
             return
 
         audio_data = item.data(0, Qt.ItemDataRole.UserRole + 2)
@@ -1304,6 +1266,8 @@ class UnpackerPanel(QWidget):
         act_props = QAction("Preview Properties", self)
         act_props.triggered.connect(lambda checked=False, p=vfs_path: self._preview_props_ctx(p))
         menu.addAction(act_props)
+
+        add_tree_expand_actions(menu, self._tree, item)
 
         menu.exec(global_pos)
 
@@ -2085,78 +2049,49 @@ class UnpackerPanel(QWidget):
         self._handoff_btn.setText("Send PSKs to Queue →")
 
     # ------------------------------------------------------------------
-    # AES key management
+    # Export-section auto-expand
     # ------------------------------------------------------------------
 
-    def _add_key_row(self):
-        row = self._keys_table.rowCount()
-        self._keys_table.insertRow(row)
-        self._keys_table.setItem(row, 0, QTableWidgetItem("Main"))
-        self._keys_table.setItem(row, 1, QTableWidgetItem("00000000000000000000000000000000"))
-        self._keys_table.setItem(row, 2, QTableWidgetItem(""))
+    def _maybe_expand_export_section(self) -> None:
+        """Open the bottom Export panel the first time the user selects a row.
 
-    def _remove_selected_key(self):
-        rows = sorted(set(idx.row() for idx in self._keys_table.selectedIndexes()), reverse=True)
-        for row in rows:
-            self._keys_table.removeRow(row)
+        Once expanded we leave it alone; collapsing/auto-collapsing while the
+        user is mid-action would feel jarring.
+        """
+        if not getattr(self, "_export_section", None):
+            return
+        if self._export_section._expanded:
+            return
+        if self._tree.selectedItems():
+            self._export_section._toggle()
+
+    # ------------------------------------------------------------------
+    # AES keys
+    # ------------------------------------------------------------------
 
     def _get_aes_keys(self) -> list[dict]:
-        keys = []
-        for row in range(self._keys_table.rowCount()):
-            label = (self._keys_table.item(row, 0) or QTableWidgetItem()).text().strip()
-            guid = (self._keys_table.item(row, 1) or QTableWidgetItem()).text().strip()
-            key = (self._keys_table.item(row, 2) or QTableWidgetItem()).text().strip()
-            if key:
-                keys.append({"label": label, "guid": guid, "key": key})
-        return keys
+        """Return the AES keys snapshotted from the active profile.
 
-    def _save_keys_to_config(self):
-        config.set("aes_keys", json.dumps(self._get_aes_keys()))
+        The Unpacker no longer owns an editor for these — the profile dialog
+        and the encrypted-archive prompt are the only edit points.
+        """
+        return list(self._aes_keys)
 
-    def _load_keys_from_config(self):
-        raw = config.get("aes_keys")
-        if not raw:
-            return
-        try:
-            keys = json.loads(raw)
-        except json.JSONDecodeError:
-            return
-        for k in keys:
-            row = self._keys_table.rowCount()
-            self._keys_table.insertRow(row)
-            self._keys_table.setItem(row, 0, QTableWidgetItem(k.get("label", "")))
-            self._keys_table.setItem(row, 1, QTableWidgetItem(k.get("guid", "")))
-            self._keys_table.setItem(row, 2, QTableWidgetItem(k.get("key", "")))
+    def apply_profile_aes_keys(self, keys: list[dict]) -> None:
+        """Replace the in-memory snapshot. MainWindow calls this after the
+        AES prompt persists keys back to the profile so a subsequent remount
+        sees the new values without a full profile reload."""
+        self._aes_keys = list(keys or [])
 
     # ------------------------------------------------------------------
     # Browse helpers
     # ------------------------------------------------------------------
-
-    def _browse_game_dir(self):
-        start = self._game_dir_edit.text().strip()
-        path = QFileDialog.getExistingDirectory(self, "Select Game Content Folder", start)
-        if path:
-            self._game_dir_edit.setText(path)
-            # Only allow auto-detect to overwrite generic versions (GAME_UE4_x / GAME_UE5_x).
-            # Game-specific overrides like GAME_RocketLeague must not be clobbered.
-            current_ver = self._ue_version_combo.currentText()
-            if current_ver.startswith(("GAME_UE4_", "GAME_UE5_")):
-                self._ue_version_user_set = False
-            if self._unpacker.is_running:
-                self._unpacker.detect_ue_version(path)
 
     def _browse_output_dir(self):
         start = self._output_dir_edit.text().strip()
         path = QFileDialog.getExistingDirectory(self, "Select Output Directory", start)
         if path:
             self._output_dir_edit.setText(path)
-
-    def _browse_mappings(self):
-        start = self._mappings_edit.text().strip()
-        path, _ = QFileDialog.getOpenFileName(self, "Select Mappings File", start,
-                                               "USMAP Files (*.usmap);;All Files (*)")
-        if path:
-            self._mappings_edit.setText(path)
 
     # ------------------------------------------------------------------
     # Error / warning / cleanup
@@ -2216,18 +2151,22 @@ class UnpackerPanel(QWidget):
     @Slot(str, str, str)
     def _on_version_detected(self, suggested: str, source_exe: str, file_version: str):
         if suggested:
-            # Auto-detected a version
-            if not self._ue_version_user_set:
+            # Auto-detected a version. The combo is read-only in the UI but we
+            # still update it so the displayed value reflects what the CLI is
+            # using. Saved via config so the next launch starts with the same.
+            self._ue_version_combo.blockSignals(True)
+            idx = self._ue_version_combo.findText(suggested)
+            if idx >= 0:
+                self._ue_version_combo.setCurrentIndex(idx)
+            else:
+                self._ue_version_combo.addItem(suggested)
                 self._ue_version_combo.setCurrentText(suggested)
+            self._ue_version_combo.blockSignals(False)
             log_msg = f"Auto-detected UE version: {suggested} (from {source_exe}, FileVersion {file_version})"
         else:
             # Detection failed
             log_msg = f"UE version detection failed: {file_version}"
         self.log_message.emit(log_msg, "info")
-
-    @Slot()
-    def _on_ue_version_changed(self):
-        self._ue_version_user_set = True
 
     @Slot(str)
     def _on_error(self, message: str):
@@ -2264,5 +2203,4 @@ class UnpackerPanel(QWidget):
 
     def shutdown(self):
         """Stop the CLI process (called on app exit)."""
-        self._save_keys_to_config()
         self._unpacker.stop()

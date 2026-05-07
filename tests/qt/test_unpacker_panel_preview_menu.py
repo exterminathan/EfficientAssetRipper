@@ -15,13 +15,22 @@ from gui.unpacker_panel import UnpackerPanel
 pytestmark = pytest.mark.qt
 
 
-def _capture_menu_actions(panel: UnpackerPanel, item: QTreeWidgetItem) -> list[str]:
-    """Drive `_popup_context_menu` and return the list of action labels.
+# The shared expand/collapse helper appends these to every tree menu — the
+# preview-specific tests assert on the asset-specific actions only.
+_EXPAND_ACTION_LABELS = {
+    "Expand All",
+    "Collapse All",
+    "Expand Selected",
+    "Collapse Selected",
+}
 
-    Patches `QMenu.__init__` so the *next* QMenu created has its `exec`
-    replaced by a recorder. This is the only reliable way to introspect
-    a QMenu built and shown inside a single Python call — class-level
-    method patches don't take on the C++-backed exec slot.
+
+def _capture_menu_actions(panel: UnpackerPanel, item: QTreeWidgetItem) -> list[str]:
+    """Drive `_popup_context_menu` and return the list of asset-specific action labels.
+
+    Filters out the trailing Expand/Collapse helper entries (and the
+    separator that precedes them) so existing assertions stay focused on
+    the preview-related options.
     """
     captured: list[list[str]] = []
     orig_init = QMenu.__init__
@@ -29,7 +38,15 @@ def _capture_menu_actions(panel: UnpackerPanel, item: QTreeWidgetItem) -> list[s
     def hooked(self, *args, **kwargs):
         orig_init(self, *args, **kwargs)
         def _rec(*a, **k):
-            captured.append([action.text() for action in self.actions()])
+            labels: list[str] = []
+            for action in self.actions():
+                text = action.text()
+                if action.isSeparator():
+                    continue
+                if text in _EXPAND_ACTION_LABELS:
+                    continue
+                labels.append(text)
+            captured.append(labels)
             return None
         self.exec = _rec  # type: ignore[assignment]
 

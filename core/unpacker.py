@@ -29,7 +29,7 @@ class UnpackerProcess(QObject):
     """
 
     # Signals
-    initialized = Signal(int, int, int, int, int)  # archive_count, unmounted_count, file_count, keys_submitted, loose_file_count
+    initialized = Signal(int, int, int, int, int, list)  # archive_count, unmounted_count, file_count, keys_submitted, loose_file_count, unmounted_archives
     browse_result = Signal(str, list)         # path, list[dict{name, is_folder}]
     progress = Signal(int, int, str)          # current, total, message
     export_done = Signal(list, list)          # succeeded: list[str], failed: list[dict]
@@ -278,6 +278,7 @@ class UnpackerProcess(QObject):
                 msg.get("file_count", 0),
                 msg.get("keys_submitted", 0),
                 msg.get("loose_file_count", 0),
+                msg.get("unmounted_archives") or [],
             )
 
         elif msg_type == "browse_result":

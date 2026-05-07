@@ -181,10 +181,26 @@ EfficientAssetRipper requires a PSK import addon in Blender. The default is the 
    - **Mounted folder** — where the unpacker writes exported files
    - **Output folder** — where `.blend` files will be saved
    - **AES Keys** — paste the GUID + key for each `.pak`. Most games
-     use a single GUID of all zeros.
+     use a single GUID of all zeros. The Unpacker no longer has its
+     own key editor; **Manage Profiles → AES Keys** is the only edit
+     point. If you click **Mount Archives** and the CLI reports
+     encrypted archives, a prompt opens automatically so you can paste
+     the missing key without leaving the workspace.
 4. **Scan** — click **Scan Game Folder** to discover meshes
 5. **Select & Process** — check assets in the browser tree, click
    **Add to Queue**, then **Process Queue**.
+
+### Workspace controls
+
+- **Dockable panels** — every tab (left and right) is a draggable dock.
+  Drop one onto an edge or another dock to tile or tabify, like VS
+  Code's panel system. The arrangement persists between sessions.
+- **Window menu** — toggle individual docks on/off; **Window → Reset
+  Layout** restores the default left/right preset.
+- **Tree controls** — right-click any tree row for **Expand All /
+  Collapse All / Expand Selected / Collapse Selected**. **Alt+click**
+  on a folder recursively expands or collapses its descendants. Typing
+  in the search box auto-expands matching rows.
 
 If something goes wrong, see
 [docs/troubleshooting.md](docs/troubleshooting.md) for common
@@ -329,14 +345,15 @@ EfficientAssetRipper/
 │   ├── texture_resolver.py  # Texture classification & file lookup
 │   └── unpacker.py          # CUE4ParseCLI NDJSON IPC wrapper
 │
-├── gui/                     # PySide6 UI
-│   ├── main_window.py       # Central window orchestrator
+├── gui/                     # PySide6 UI (every panel ships as a QDockWidget)
+│   ├── main_window.py       # Dockable workspace orchestrator + layout persistence
+│   ├── aes_prompt_dialog.py # Modal that opens when CLI reports encrypted archives
 │   ├── asset_browser.py     # Hierarchical asset tree with filtering
 │   ├── media_previewer.py   # Unified audio + video playback panel
 │   ├── blend_combiner.py    # Multi-blend merge tool
 │   ├── color_schemes.py     # Built-in + custom color scheme registry
 │   ├── log_viewer.py        # Color-coded log display
-│   ├── profile_bar.py       # Profile selector toolbar
+│   ├── profile_dialog.py    # Manage Profiles editor (single source of truth for AES keys)
 │   ├── psk_picker.py        # PSK file browser with Everything search
 │   ├── queue_panel.py       # Processing queue table
 │   ├── settings_panel.py    # Configuration dialog (paths, processing, appearance)
@@ -344,7 +361,7 @@ EfficientAssetRipper/
 │   ├── text_viewer.py       # Read-only text/JSON viewer
 │   ├── tga_previewer.py     # TGA/PNG image viewer with zoom
 │   ├── theme.py             # Centralized theming (palette, QSS, fonts)
-│   ├── unpacker_panel.py    # VFS browser & asset export UI
+│   ├── unpacker_panel.py    # VFS browser & asset export UI (read-only mount toolbar)
 │   └── widgets.py           # Reusable widgets (zoomable tree, collapsible sections)
 │
 ├── blender/                 # Headless Blender scripts (run as subprocesses)

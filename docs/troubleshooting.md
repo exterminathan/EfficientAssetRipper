@@ -44,20 +44,25 @@ shell, and you'll see the full Blender stderr.
 ## "AES key didn't unlock archive"
 
 The Unpacker reports "X archives need AES keys" when one or more `.pak`
-files refused decryption.
+files refused decryption. AES keys live in the active profile only —
+the Unpacker tab no longer has its own editor.
 
 Fixes:
 
-1. Open **Manage Profiles**, scroll to **AES Keys**.
-2. Verify the GUID and key are entered correctly. The key is a 64-char
+1. The **fastest path**: when **Mount Archives** detects encrypted
+   archives, a dialog opens automatically with the affected archive
+   names + GUIDs. Paste the matching key, click **OK**, and the
+   profile is updated and remounted in one go.
+2. Manual edit: open **Manage Profiles**, scroll to **AES Keys**.
+3. Verify the GUID and key are entered correctly. The key is a 64-char
    hex string (32 bytes); the GUID is `00000000000000000000000000000000`
    for most games' main key.
-3. Try **0x** prefix on the key — some sources include it, some don't.
+4. Try **0x** prefix on the key — some sources include it, some don't.
    Both work, the unpacker normalises.
-4. If the same archive is decrypted fine by another tool but not us,
-   check the **UE Version** dropdown — wrong version = "wrong" key
-   even if the key itself is right.
-5. Per-archive AES keys (multiple GUIDs) are supported — add a row per
+5. If the same archive is decrypted fine by another tool but not us,
+   check the **UE Version** in the profile — wrong version = "wrong"
+   key even if the key itself is right.
+6. Per-archive AES keys (multiple GUIDs) are supported — add a row per
    key.
 
 > ⚠️ **Never paste AES keys into a public bug report.** The crash

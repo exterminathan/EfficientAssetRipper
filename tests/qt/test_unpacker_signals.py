@@ -108,10 +108,27 @@ def test_initialized_signal_fires_on_init_ndjson(unpacker_with_stub, qtbot):
         "file_count": 100,
         "keys_submitted": 2,
         "loose_file_count": 5,
+        "unmounted_archives": [{"name": "pakchunk0.pak", "guid": "00000000000000000000000000000000"}],
     }
     with qtbot.waitSignal(up.initialized, timeout=1000) as sig:
         proc.feed(json.dumps(msg))
-    assert sig.args == [3, 1, 100, 2, 5]
+    assert sig.args == [3, 1, 100, 2, 5, [{"name": "pakchunk0.pak", "guid": "00000000000000000000000000000000"}]]
+
+
+def test_initialized_signal_defaults_unmounted_archives_to_empty_list(unpacker_with_stub, qtbot):
+    up, proc = unpacker_with_stub
+    msg = {
+        "type": "init_done",
+        "archive_count": 1,
+        "unmounted_count": 0,
+        "file_count": 50,
+        "keys_submitted": 0,
+        "loose_file_count": 0,
+        # Older CLI builds omit unmounted_archives entirely.
+    }
+    with qtbot.waitSignal(up.initialized, timeout=1000) as sig:
+        proc.feed(json.dumps(msg))
+    assert sig.args == [1, 0, 50, 0, 0, []]
 
 
 def test_browse_result_signal_carries_entries(unpacker_with_stub, qtbot):

@@ -134,10 +134,7 @@ def test_editor_collects_aes_key_table(qtbot, tmp_profiles_dir):
 
     dlg = ProfileDialog(pm, current_profile="Game")
     qtbot.addWidget(dlg)
-    dlg._editor._add_key_row()
-    # Default placeholder row needs a non-empty key to be collected
-    from PySide6.QtWidgets import QTableWidgetItem
-    dlg._editor._keys_table.setItem(0, 2, QTableWidgetItem("0xDEADBEEF"))
+    dlg._editor._keys_table.add_prefilled_row(label="Main", guid="00000000000000000000000000000000", key="0xDEADBEEF")
 
     data = dlg._editor.collect_data()
     assert any(k.get("key") == "0xDEADBEEF" for k in data["aes_keys"])

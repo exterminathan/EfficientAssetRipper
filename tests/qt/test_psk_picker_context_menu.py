@@ -15,16 +15,36 @@ from gui.psk_picker import PskPickerPanel
 pytestmark = pytest.mark.qt
 
 
+# The shared expand/collapse helper appends these to every tree menu.
+_EXPAND_ACTION_LABELS = {
+    "Expand All",
+    "Collapse All",
+    "Expand Selected",
+    "Collapse Selected",
+}
+
+
 def _capture_menu_actions(panel: PskPickerPanel, item: QTreeWidgetItem) -> list[str]:
-    """Drive `_popup_context_menu` and return the list of action labels.
-    Mirrors the same pattern used in the unpacker preview-menu tests."""
+    """Drive `_popup_context_menu` and return the picker-specific action labels.
+
+    Filters out the shared Expand/Collapse helper entries so existing
+    assertions stay focused on the preview / reveal options.
+    """
     captured: list[list[str]] = []
     orig_init = QMenu.__init__
 
     def hooked(self, *args, **kwargs):
         orig_init(self, *args, **kwargs)
         def _rec(*a, **k):
-            captured.append([action.text() for action in self.actions()])
+            labels: list[str] = []
+            for action in self.actions():
+                text = action.text()
+                if action.isSeparator():
+                    continue
+                if text in _EXPAND_ACTION_LABELS:
+                    continue
+                labels.append(text)
+            captured.append(labels)
             return None
         self.exec = _rec  # type: ignore[assignment]
 

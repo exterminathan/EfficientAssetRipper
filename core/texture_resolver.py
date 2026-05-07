@@ -328,7 +328,13 @@ def resolve_textures(
         presets_data.get("_auto_resolve_fallback", True)
         and preset.get("enable_keyword_fallback", True)
     )
-    if fallback_enabled and reference_path is not None:
+    # Only run the keyword fallback when the main pass produced nothing.
+    # When suffix/param matching already resolved at least one slot, the
+    # material has a non-trivial explicit spec — padding the empty slots from
+    # a wide folder scan pulls in unrelated textures (Obduction-style master
+    # materials are the canonical offender; the broad Content/ scan finds
+    # `*_Roughness`/`*_METALLIC` from elsewhere in the game).
+    if fallback_enabled and reference_path is not None and not resolved:
         _apply_keyword_fallback(
             resolved=resolved,
             unresolved=unresolved,

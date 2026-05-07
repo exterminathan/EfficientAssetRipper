@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRunnable, QThread, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QByteArray, Qt, QRunnable, QThread, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDockWidget,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -17,7 +19,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -40,7 +41,6 @@ from gui.tga_previewer import TGAPreviewerPanel
 from gui.media_previewer import MediaPreviewerPanel
 from gui.mesh_previewer import MeshPreviewerPanel
 from gui.log_viewer import LogViewer
-from gui.profile_bar import ProfileBar
 from gui.psk_picker import PskPickerPanel
 from gui.queue_panel import QueuePanel
 from gui.text_viewer import TextViewer
@@ -208,6 +208,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._refresh_blender_dependent_ui()
+        # Restore the user's last dock layout + window geometry. Falls back
+        # to the default factory layout on schema mismatch / first launch /
+        # corrupt state.
+        if not self._restore_layout():
+            self._apply_default_geometry()
         self._load_initial_profile()
         # Defer the setup wizard until after splash → window handoff so the
         # modal dialog doesn't fight the splash for focus.
@@ -281,115 +286,102 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self):
+        # ── Central widget: empty placeholder ─────────────────────────
+        # Every panel ships as a QDockWidget; QMainWindow requires a
+        # central widget but ours has no chrome of its own. Profile
+        # selection moved to the Profiles menu, scan controls moved into
+        # the Asset Browser dock.
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        central.setMaximumSize(0, 0)  # collapse to zero so docks meet in the middle
 
-        # ── Profile bar (top) ─────────────────────────────────────────
-        self._profile_bar = ProfileBar(
-            self._profile_manager,
-            busy_check=self._is_busy,
-            cancel_fn=self._cancel_active_ops,
-            parent=self,
-        )
-        self._profile_bar.profile_switch_requested.connect(self._switch_profile)
-        self._profile_bar.manage_requested.connect(self._open_profile_dialog)
-        main_layout.addWidget(self._profile_bar)
+        # Tracks the currently active profile so menu rebuilds can mark it
+        # checked. Also used by busy-check / revert flow for menu-driven
+        # profile switches.
+        self._active_profile_name: str = ""
+        self._suppress_profile_menu_event: bool = False
 
-        # ── Main content area ─────────────────────────────────────────
-        content = QWidget()
-        content_layout = QHBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Left panel: tabs for asset browser and PSK picker
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-
-        scan_bar = QHBoxLayout()
-        self._scan_btn = QPushButton("Scan Game Folder")
-        self._scan_btn.clicked.connect(self._start_scan)
-        scan_bar.addWidget(self._scan_btn)
-
-        self._cancel_scan_btn = QPushButton("Cancel Scan")
-        self._cancel_scan_btn.setEnabled(False)
-        self._cancel_scan_btn.clicked.connect(self._cancel_scan)
-        scan_bar.addWidget(self._cancel_scan_btn)
-
-        scan_bar.addStretch()
-        left_layout.addLayout(scan_bar)
-
-        self._left_tabs = QTabWidget()
-
+        # ── Build panels ──────────────────────────────────────────────
         self._browser = AssetBrowser()
-        self._left_tabs.addTab(self._browser, "Asset Browser")
-
         self._psk_picker = PskPickerPanel()
-        self._left_tabs.addTab(self._psk_picker, "PSK Picker")
-
         self._unpacker_panel = UnpackerPanel()
-        self._left_tabs.addTab(self._unpacker_panel, "Unpacker")
 
-        left_layout.addWidget(self._left_tabs)
-
-        # Right panel: tabs (queue/log vs combiner)
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-
-        self._right_tabs = QTabWidget()
-
-        # Tab 1: Queue + Log
         queue_log_widget = QWidget()
         ql_layout = QVBoxLayout(queue_log_widget)
         ql_layout.setContentsMargins(0, 0, 0, 0)
-
         right_splitter = QSplitter(Qt.Orientation.Vertical)
-
         self._queue = QueuePanel()
         right_splitter.addWidget(self._queue)
-
         self._log = LogViewer()
         right_splitter.addWidget(self._log)
-
         right_splitter.setSizes([300, 200])
         ql_layout.addWidget(right_splitter)
+        self._queue_log_widget = queue_log_widget
 
-        self._right_tabs.addTab(queue_log_widget, "Queue / Log")
-
-        # Tab 2: Blend Combiner
         self._combiner = BlendCombinerPanel()
         self._combiner.log_message.connect(self._log.append)
-        self._right_tabs.addTab(self._combiner, "Blend Combiner")
-
-        # Tab 3: TGA Previewer
         self._tga_previewer = TGAPreviewerPanel()
-        self._right_tabs.addTab(self._tga_previewer, "TGA Previewer")
-
-        # Tab 4: Text Viewer
         self._text_viewer = TextViewer()
-        self._right_tabs.addTab(self._text_viewer, "Text Viewer")
-
-        # Tab 5: Media Preview (audio + video)
         self._media_previewer = MediaPreviewerPanel()
-        self._right_tabs.addTab(self._media_previewer, "Media Preview")
-
-        # Tab 6: Mesh Preview
         self._mesh_previewer = MeshPreviewerPanel()
-        self._right_tabs.addTab(self._mesh_previewer, "Mesh Preview")
 
-        right_layout.addWidget(self._right_tabs)
+        # ── Wrap panels in QDockWidgets (in-window only — no floating) ─
+        # `_dock_specs` is the single source of truth for dock identity, the
+        # default factory layout, and the Window menu's L→R ordering.
+        self._dock_specs: list[tuple[str, str, str, QWidget, Qt.DockWidgetArea, str]] = [
+            # (object_name,            menu label,        title,             widget,                  area,                              side)
+            ("dock_asset_browser",    "Asset Browser",   "Asset Browser",   self._browser,           Qt.DockWidgetArea.LeftDockWidgetArea,  "left"),
+            ("dock_psk_picker",       "PSK Picker",      "PSK Picker",      self._psk_picker,        Qt.DockWidgetArea.LeftDockWidgetArea,  "left"),
+            ("dock_unpacker",         "Unpacker",        "Unpacker",        self._unpacker_panel,    Qt.DockWidgetArea.LeftDockWidgetArea,  "left"),
+            ("dock_queue_log",        "Queue / Log",     "Queue / Log",     self._queue_log_widget,  Qt.DockWidgetArea.RightDockWidgetArea, "right"),
+            ("dock_blend_combiner",   "Blend Combiner",  "Blend Combiner",  self._combiner,          Qt.DockWidgetArea.RightDockWidgetArea, "right"),
+            ("dock_tga_previewer",    "TGA Previewer",   "TGA Previewer",   self._tga_previewer,     Qt.DockWidgetArea.RightDockWidgetArea, "right"),
+            ("dock_text_viewer",      "Text Viewer",     "Text Viewer",     self._text_viewer,       Qt.DockWidgetArea.RightDockWidgetArea, "right"),
+            ("dock_media_previewer",  "Media Preview",   "Media Preview",   self._media_previewer,   Qt.DockWidgetArea.RightDockWidgetArea, "right"),
+            ("dock_mesh_previewer",   "Mesh Preview",    "Mesh Preview",    self._mesh_previewer,    Qt.DockWidgetArea.RightDockWidgetArea, "right"),
+        ]
+        self._docks: dict[str, QDockWidget] = {}
+        for object_name, _menu, title, widget, _area, _side in self._dock_specs:
+            dock = QDockWidget(title, self)
+            dock.setObjectName(object_name)
+            dock.setWidget(widget)
+            dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+            # No DockWidgetFloatable → user can't pop docks out as OS windows.
+            dock.setFeatures(
+                QDockWidget.DockWidgetFeature.DockWidgetClosable
+                | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            )
+            self._docks[object_name] = dock
 
-        # Main horizontal splitter
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setSizes([600, 600])
-        content_layout.addWidget(splitter)
+        # Friendly attributes for the rest of the file (and for tests).
+        self._asset_browser_dock = self._docks["dock_asset_browser"]
+        self._psk_picker_dock = self._docks["dock_psk_picker"]
+        self._unpacker_dock = self._docks["dock_unpacker"]
+        self._queue_log_dock = self._docks["dock_queue_log"]
+        self._combiner_dock = self._docks["dock_blend_combiner"]
+        self._tga_previewer_dock = self._docks["dock_tga_previewer"]
+        self._text_viewer_dock = self._docks["dock_text_viewer"]
+        self._media_previewer_dock = self._docks["dock_media_previewer"]
+        self._mesh_previewer_dock = self._docks["dock_mesh_previewer"]
 
-        main_layout.addWidget(content, stretch=1)
+        # Tabify-tabs at the TOP of each dock area (default Qt is bottom).
+        # Applied to all four areas so tabs stay on top regardless of where
+        # the user drags a dock.
+        from PySide6.QtWidgets import QTabWidget
+        for _area in (
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            Qt.DockWidgetArea.TopDockWidgetArea,
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+        ):
+            self.setTabPosition(_area, QTabWidget.TabPosition.North)
+
+        self._apply_default_dock_layout()
+        # Snapshot the default layout *once*, immediately after building it.
+        # Reset Layout calls restoreState(...) with this blob instead of
+        # tearing docks out one-by-one — removeDockWidget on a hidden dock
+        # while the window is shown can ACV inside Qt's internals on Windows.
+        self._default_layout_state = self.saveState(self._LAYOUT_SCHEMA_VERSION)
 
         # Status bar
         self._statusbar = QStatusBar()
@@ -406,6 +398,8 @@ class MainWindow(QMainWindow):
         self._browser.delete_requested.connect(self._on_browser_delete)
         self._browser.mesh_preview_requested.connect(self._on_browser_mesh_preview)
         self._browser.props_view_requested.connect(self._on_browser_props_view)
+        self._browser.scan_requested.connect(self._start_scan)
+        self._browser.cancel_scan_requested.connect(self._cancel_scan)
         self._psk_picker.add_to_queue_requested.connect(self._add_picker_to_queue)
         self._psk_picker.mesh_preview_requested.connect(self._on_mesh_preview)
         self._unpacker_panel.psk_extracted.connect(self._on_psks_extracted)
@@ -415,6 +409,7 @@ class MainWindow(QMainWindow):
         self._unpacker_panel.media_preview.connect(self._on_media_preview)
         self._unpacker_panel.tga_preview.connect(self._on_tga_preview)
         self._unpacker_panel.mesh_preview.connect(self._on_mesh_preview)
+        self._unpacker_panel.aes_keys_required.connect(self._on_aes_keys_required)
 
         # Give the unpacker access to each previewer's temp directory so it
         # can drop preview-only exports there instead of the user's real
@@ -424,24 +419,29 @@ class MainWindow(QMainWindow):
         self._unpacker_panel._tga_preview_temp_dir = self._tga_previewer.temp_dir
 
     def _show_in_text_viewer(self, title: str, text: str):
-        """Display text content in the Text Viewer tab and switch to it."""
+        """Display text content in the Text Viewer dock and surface it."""
         self._text_viewer.show_text(title, text)
-        self._right_tabs.setCurrentWidget(self._text_viewer)
+        self._raise_dock(self._text_viewer_dock)
 
     def _on_media_preview(self, path: str):
-        """Load audio or video file in the Media Preview tab and switch to it."""
+        """Load audio or video file in the Media Preview dock and surface it."""
         self._media_previewer.load_file(path)
-        self._right_tabs.setCurrentWidget(self._media_previewer)
+        self._raise_dock(self._media_previewer_dock)
 
     def _on_tga_preview(self, path: str):
-        """Load image file in the TGA Previewer tab and switch to it."""
+        """Load image file in the TGA Previewer dock and surface it."""
         self._tga_previewer.load_file(path)
-        self._right_tabs.setCurrentWidget(self._tga_previewer)
+        self._raise_dock(self._tga_previewer_dock)
 
     def _on_mesh_preview(self, path: str):
-        """Load .psk in the Mesh Preview tab and switch to it."""
+        """Load .psk in the Mesh Preview dock and surface it."""
         self._mesh_previewer.load_psk(path)
-        self._right_tabs.setCurrentWidget(self._mesh_previewer)
+        self._raise_dock(self._mesh_previewer_dock)
+
+    @staticmethod
+    def _raise_dock(dock: QDockWidget) -> None:
+        dock.show()
+        dock.raise_()
 
     def _on_browser_mesh_preview(self, asset):
         self._on_mesh_preview(str(asset.psk_path))
@@ -460,7 +460,7 @@ class MainWindow(QMainWindow):
         self._show_in_text_viewer(f"Properties — {asset.name}", text)
 
     def _build_menu(self):
-        from PySide6.QtGui import QAction
+        from PySide6.QtGui import QAction, QActionGroup
 
         menubar = self.menuBar()
 
@@ -474,10 +474,21 @@ class MainWindow(QMainWindow):
         exit_action = file_menu.addAction("E&xit", self.close)
         exit_action.setMenuRole(QAction.MenuRole.NoRole)
 
+        # ── Profiles menu — replaces the in-window ProfileBar ─────────
+        # Built dynamically: aboutToShow re-reads the profile manager so
+        # newly-created/renamed/deleted profiles are reflected without
+        # needing an explicit refresh from the dialog.
+        self._profiles_menu = menubar.addMenu("&Profiles")
+        self._profile_action_group = QActionGroup(self._profiles_menu)
+        self._profile_action_group.setExclusive(True)
+        self._profiles_menu.aboutToShow.connect(self._rebuild_profiles_menu)
+        # Build once now so other code (refresh callers) can rely on it.
+        self._rebuild_profiles_menu()
+
         tools_menu = menubar.addMenu("&Tools")
         self._blend_combiner_action = tools_menu.addAction(
             "&Blend Combiner",
-            lambda: self._right_tabs.setCurrentWidget(self._combiner),
+            lambda: self._raise_dock(self._combiner_dock),
         )
 
         help_menu = menubar.addMenu("&Help")
@@ -486,22 +497,18 @@ class MainWindow(QMainWindow):
         help_menu.addSeparator()
         help_menu.addAction("&About...", self._show_about)
 
-        # ── Window menu — toggle visibility of each tab ───────────────
+        # ── Window menu — dock visibility (in original L→R order) +
+        # Reset Layout. QDockWidget.toggleViewAction() handles the check
+        # state syncing whenever the user closes a dock via its X button.
         window_menu = menubar.addMenu("&Window")
-        self._tab_actions = {}
-        for tabs, names in [
-            (self._left_tabs, ["Asset Browser", "PSK Picker", "Unpacker"]),
-            (self._right_tabs, ["Queue / Log", "Blend Combiner", "TGA Previewer", "Text Viewer", "Media Preview"]),
-        ]:
-            for i, name in enumerate(names):
-                action = window_menu.addAction(name)
-                action.setCheckable(True)
-                action.setChecked(True)
-                widget = tabs.widget(i)
-                action.triggered.connect(
-                    lambda checked, t=tabs, w=widget, n=name: self._toggle_tab(t, w, n, checked)
-                )
-                self._tab_actions[(id(tabs), name)] = (action, tabs, widget, i)
+        for object_name, menu_label, _title, _widget, _area, _side in self._dock_specs:
+            dock = self._docks[object_name]
+            action = dock.toggleViewAction()
+            action.setText(menu_label)
+            window_menu.addAction(action)
+        window_menu.addSeparator()
+        reset_action = window_menu.addAction("&Reset Layout")
+        reset_action.triggered.connect(self._reset_dock_layout)
 
     def _show_about(self):
         from html import escape
@@ -607,16 +614,119 @@ class MainWindow(QMainWindow):
         checker.check_complete.connect(_on_complete)
         checker.start(force_refresh=True)
 
-    def _toggle_tab(self, tab_widget: QTabWidget, widget: QWidget, name: str, visible: bool):
-        """Show or hide a tab in a QTabWidget."""
-        idx = tab_widget.indexOf(widget)
-        if visible and idx == -1:
-            # Re-insert at the original position
-            _, _, _, orig_idx = self._tab_actions[(id(tab_widget), name)]
-            insert_at = min(orig_idx, tab_widget.count())
-            tab_widget.insertTab(insert_at, widget, name)
-        elif not visible and idx != -1:
-            tab_widget.removeTab(idx)
+    # ------------------------------------------------------------------
+    # Dock layout (default + persistence)
+    # ------------------------------------------------------------------
+
+    _LAYOUT_SCHEMA_VERSION = 2
+    _LAYOUT_KEY_GEOMETRY = "ui/main_window_geometry"
+    _LAYOUT_KEY_STATE = "ui/main_window_state"
+    _LAYOUT_KEY_SCHEMA = "ui/main_window_layout_schema"
+
+    def _apply_default_dock_layout(self) -> None:
+        """Lay docks out as 3 left + 6 right, both groups tabified.
+
+        Only used at startup — Reset Layout uses ``restoreState`` against the
+        snapshot captured right after this runs, which avoids the
+        ``removeDockWidget``-on-hidden-dock crash that Qt can hit on Windows.
+        """
+        left_docks: list[QDockWidget] = []
+        right_docks: list[QDockWidget] = []
+        for object_name, _menu, _title, _widget, area, side in self._dock_specs:
+            dock = self._docks[object_name]
+            self.addDockWidget(area, dock)
+            dock.setVisible(True)
+            (left_docks if side == "left" else right_docks).append(dock)
+
+        for prev, nxt in zip(left_docks, left_docks[1:]):
+            self.tabifyDockWidget(prev, nxt)
+        for prev, nxt in zip(right_docks, right_docks[1:]):
+            self.tabifyDockWidget(prev, nxt)
+
+        if left_docks:
+            left_docks[0].raise_()
+        if right_docks:
+            right_docks[0].raise_()
+
+        if left_docks and right_docks:
+            self.resizeDocks(
+                [left_docks[0], right_docks[0]],
+                [600, 600],
+                Qt.Orientation.Horizontal,
+            )
+
+    def _reset_dock_layout(self) -> None:
+        """Window → Reset Layout. Restores defaults and clears persisted state."""
+        # Reopen any closed docks first so restoreState has them to position.
+        for dock in self._docks.values():
+            if not dock.isVisible():
+                dock.show()
+        # Restore the snapshot captured right after the initial layout —
+        # this is the canonical "factory" state.
+        if getattr(self, "_default_layout_state", None) is not None:
+            self.restoreState(self._default_layout_state, self._LAYOUT_SCHEMA_VERSION)
+        try:
+            config.set(self._LAYOUT_KEY_GEOMETRY, "")
+            config.set(self._LAYOUT_KEY_STATE, "")
+            config.set(self._LAYOUT_KEY_SCHEMA, 0)
+        except Exception:  # noqa: BLE001
+            log.exception("Failed to clear persisted layout")
+
+    def _save_layout(self) -> None:
+        try:
+            geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
+            state = bytes(self.saveState(self._LAYOUT_SCHEMA_VERSION).toBase64()).decode("ascii")
+            config.set(self._LAYOUT_KEY_GEOMETRY, geometry)
+            config.set(self._LAYOUT_KEY_STATE, state)
+            config.set(self._LAYOUT_KEY_SCHEMA, self._LAYOUT_SCHEMA_VERSION)
+        except Exception:  # noqa: BLE001
+            log.exception("Failed to save dock layout")
+
+    def _restore_layout(self) -> bool:
+        """Restore geometry + dock state from QSettings.
+
+        Returns True if a saved layout was applied, False on first launch /
+        schema mismatch / corrupt blob (caller can fall back to defaults).
+        """
+        try:
+            schema = int(config.get(self._LAYOUT_KEY_SCHEMA) or 0)
+        except (TypeError, ValueError):
+            schema = 0
+        if schema != self._LAYOUT_SCHEMA_VERSION:
+            return False
+
+        geometry_b64 = config.get(self._LAYOUT_KEY_GEOMETRY) or ""
+        state_b64 = config.get(self._LAYOUT_KEY_STATE) or ""
+        if not geometry_b64 or not state_b64:
+            return False
+
+        try:
+            geometry = QByteArray.fromBase64(geometry_b64.encode("ascii"))
+            state = QByteArray.fromBase64(state_b64.encode("ascii"))
+        except Exception:  # noqa: BLE001
+            log.exception("Stored layout blobs are corrupt; falling back to defaults")
+            return False
+
+        if not self.restoreGeometry(geometry):
+            log.warning("restoreGeometry rejected the saved blob; using defaults")
+            return False
+        if not self.restoreState(state, self._LAYOUT_SCHEMA_VERSION):
+            log.warning("restoreState rejected the saved blob; using defaults")
+            return False
+        return True
+
+    def _apply_default_geometry(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1600, 950)
+            return
+        avail = screen.availableGeometry()
+        w = min(1600, avail.width())
+        h = min(950, avail.height())
+        self.resize(w, h)
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.y() + (avail.height() - h) // 2
+        self.move(x, y)
 
     # ------------------------------------------------------------------
     # Settings
@@ -647,13 +757,11 @@ class MainWindow(QMainWindow):
         from core.blender_runner import is_blender_available
         available = is_blender_available()
 
-        combiner_idx = self._right_tabs.indexOf(self._combiner)
-        if combiner_idx != -1:
-            self._right_tabs.setTabEnabled(combiner_idx, available)
-            self._right_tabs.setTabText(
-                combiner_idx,
-                "Blend Combiner" if available else "Blend Combiner (no Blender)",
-            )
+        # Only toggle enabled state — renaming the dock title would also
+        # rename the Window-menu entry (toggleViewAction tracks the title),
+        # which we want kept stable. The status bar carries the "no Blender"
+        # warning instead.
+        self._combiner_dock.setEnabled(available)
 
         if hasattr(self, "_blend_combiner_action") and self._blend_combiner_action is not None:
             self._blend_combiner_action.setEnabled(available)
@@ -705,8 +813,7 @@ class MainWindow(QMainWindow):
         if current_assets:
             scanner.seed_cache(current_assets)
 
-        self._scan_btn.setEnabled(False)
-        self._cancel_scan_btn.setEnabled(True)
+        self._browser.set_scan_running(True)
         self._statusbar.showMessage("Scanning...")
         self._log.append(f"Scanning: {game_folder}", "info")
 
@@ -725,14 +832,15 @@ class MainWindow(QMainWindow):
     def _cancel_scan(self):
         if self._scan_worker and self._scan_worker.isRunning():
             self._scan_worker.cancel()
-            self._cancel_scan_btn.setEnabled(False)
+            # Keep Scan disabled until the worker actually finishes; only
+            # gray out Cancel itself so a double-click can't re-fire it.
+            self._browser._cancel_scan_btn.setEnabled(False)  # cancel-in-flight indicator
             self._log.append("Cancelling scan...", "warning")
             self._statusbar.showMessage("Cancelling scan...")
 
     @Slot(list)
     def _on_scan_finished(self, assets: list):
-        self._scan_btn.setEnabled(True)
-        self._cancel_scan_btn.setEnabled(False)
+        self._browser.set_scan_running(False)
         self._browser.set_assets(assets)
         ready = sum(1 for a in assets if a.status == "ready")
         count_msg = f"{len(assets)} assets found, {ready} ready"
@@ -753,8 +861,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_scan_error(self, error: str):
-        self._scan_btn.setEnabled(True)
-        self._cancel_scan_btn.setEnabled(False)
+        self._browser.set_scan_running(False)
         self._log.append(f"Scan failed: {error}", "error")
         self._statusbar.showMessage("Scan failed")
         QMessageBox.critical(self, "Scan Error", error)
@@ -762,6 +869,86 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Profile system
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Profiles menu (replaces the old ProfileBar widget)
+    # ------------------------------------------------------------------
+
+    def _rebuild_profiles_menu(self) -> None:
+        """Repopulate the Profiles menu from disk.
+
+        Called on startup, on aboutToShow, and after any profile create /
+        rename / delete. The active profile gets a checkmark via the
+        exclusive action group.
+        """
+        from PySide6.QtGui import QAction
+
+        if not hasattr(self, "_profiles_menu"):
+            return
+
+        # Tear down the previous action group + menu items.
+        for action in list(self._profile_action_group.actions()):
+            self._profile_action_group.removeAction(action)
+        self._profiles_menu.clear()
+
+        names = self._profile_manager.list_profiles()
+        for name in names:
+            action = QAction(name, self._profiles_menu)
+            action.setCheckable(True)
+            action.setChecked(name == self._active_profile_name)
+            action.triggered.connect(lambda _checked=False, n=name: self._on_profile_menu_selected(n))
+            self._profile_action_group.addAction(action)
+            self._profiles_menu.addAction(action)
+
+        if names:
+            self._profiles_menu.addSeparator()
+
+        manage_action = QAction("&Manage Profiles...", self._profiles_menu)
+        manage_action.triggered.connect(self._open_profile_dialog)
+        self._profiles_menu.addAction(manage_action)
+
+    def _on_profile_menu_selected(self, name: str) -> None:
+        """User clicked a profile entry in the Profiles menu."""
+        if self._suppress_profile_menu_event:
+            return
+        if not name or name == self._active_profile_name:
+            return
+
+        # Busy check — same UX the old ProfileBar combo had.
+        if self._is_busy():
+            reply = QMessageBox.question(
+                self,
+                "Active Operation",
+                "An operation is currently running.\n"
+                "Cancel it and switch profiles?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                # Revert the menu's check-state to the still-active profile.
+                self._refresh_profile_menu_check()
+                return
+            self._cancel_active_ops()
+
+        self._switch_profile(name)
+
+    def _refresh_profile_menu_check(self) -> None:
+        """Sync menu check-state with self._active_profile_name without
+        triggering the action's `triggered` signal (we use this to revert
+        a cancelled busy-check switch)."""
+        if not hasattr(self, "_profile_action_group"):
+            return
+        self._suppress_profile_menu_event = True
+        try:
+            for action in self._profile_action_group.actions():
+                action.setChecked(action.text() == self._active_profile_name)
+        finally:
+            self._suppress_profile_menu_event = False
+
+    def _set_active_profile(self, name: str) -> None:
+        """Update the active-profile state + menu checkmark in one call."""
+        self._active_profile_name = name
+        self._refresh_profile_menu_check()
 
     def _load_initial_profile(self):
         """On startup, load the last-used profile (or first available)."""
@@ -776,8 +963,102 @@ class MainWindow(QMainWindow):
         else:
             target = profiles[0]
 
-        self._profile_bar.refresh(select=target)
+        self._migrate_legacy_aes_keys(target)
+        self._set_active_profile(target)
+        self._rebuild_profiles_menu()
         self._load_profile(target)
+
+    def _migrate_legacy_aes_keys(self, profile_name: str) -> None:
+        """One-shot: copy legacy global ``aes_keys`` into the active profile.
+
+        The Unpacker used to write a duplicate copy of the AES keys to global
+        QSettings via ``config.set('aes_keys', ...)``. Now that the Unpacker
+        no longer has its own AES editor, the profile JSON is the single
+        source of truth. To avoid losing keys for users upgrading past this
+        change, copy the legacy global blob into the profile *once* if the
+        profile's own ``aes_keys`` field is empty.
+        """
+        legacy = config.get("aes_keys")
+        if not legacy:
+            return
+        try:
+            data = self._profile_manager.load_profile(profile_name)
+        except Exception:  # noqa: BLE001
+            return
+        if data.get("aes_keys"):
+            # Profile already has keys — drop the legacy blob to avoid
+            # re-running this on every launch.
+            try:
+                config.set("aes_keys", "")
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            import json as _json
+            keys = _json.loads(legacy)
+        except Exception:  # noqa: BLE001
+            try:
+                config.set("aes_keys", "")
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        if not isinstance(keys, list) or not keys:
+            try:
+                config.set("aes_keys", "")
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        data["aes_keys"] = keys
+        try:
+            self._profile_manager.save_profile(profile_name, data)
+            config.set("aes_keys", "")
+            log.info("Migrated %d legacy AES key(s) into profile %s", len(keys), profile_name)
+        except Exception:  # noqa: BLE001
+            log.exception("Failed to migrate legacy AES keys into profile %s", profile_name)
+
+    @Slot(int, list)
+    def _on_aes_keys_required(self, unmounted_count: int, unmounted_archives: list) -> None:
+        """Show the AES prompt and remount on accept."""
+        from gui.aes_prompt_dialog import AesPromptDialog
+
+        if not self._current_profile_name:
+            return
+
+        try:
+            data = self._profile_manager.load_profile(self._current_profile_name)
+        except Exception:  # noqa: BLE001
+            log.exception("Failed to load profile for AES prompt")
+            return
+
+        existing_keys = list(data.get("aes_keys") or [])
+        dlg = AesPromptDialog(
+            unmounted_count=unmounted_count,
+            archive_names=list(unmounted_archives or []),
+            existing_keys=existing_keys,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._log.append(
+                f"AES prompt cancelled — {unmounted_count} archive(s) remain unmounted",
+                "warning",
+            )
+            return
+
+        new_keys = dlg.result_keys()
+        data["aes_keys"] = new_keys
+        try:
+            self._profile_manager.save_profile(self._current_profile_name, data)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Profile save failed", str(e))
+            return
+
+        # Push fresh keys into the Unpacker's snapshot and reissue mount.
+        self._unpacker_panel.apply_profile_aes_keys(new_keys)
+        self._log.append(
+            f"Saved {len(new_keys)} AES key(s) to profile {self._current_profile_name}; remounting...",
+            "info",
+        )
+        QTimer.singleShot(0, self._unpacker_panel._mount_archives)
 
     def _maybe_prompt_resume(self):
         """If a queue checkpoint exists for the current profile, ask to resume.
@@ -1003,7 +1284,8 @@ class MainWindow(QMainWindow):
         if active and needs_reload:
             self._load_profile(active)
 
-        self._profile_bar.refresh(select=active)
+        self._set_active_profile(active or "")
+        self._rebuild_profiles_menu()
 
     def _load_profile(self, name: str):
         """Load a profile from disk and push its state to all panels."""
@@ -1025,6 +1307,7 @@ class MainWindow(QMainWindow):
 
         self._current_profile_name = name
         config.set("active_profile", name)
+        self._set_active_profile(name)
 
         # Push state to panels
         self._unpacker_panel.load_from_profile(data)
@@ -1089,7 +1372,7 @@ class MainWindow(QMainWindow):
             return
         self._save_current_profile()
         self._load_profile(name)
-        self._profile_bar.set_current(name)
+        self._set_active_profile(name)
 
     # ------------------------------------------------------------------
     # Queue management
@@ -1101,7 +1384,7 @@ class MainWindow(QMainWindow):
         self._queue.add_to_queue(assets)
         self._log.append(f"Added {count} assets to queue from browser", "info")
         # Switch to queue tab so user sees the result
-        self._right_tabs.setCurrentIndex(0)
+        self._raise_dock(self._queue_log_dock)
 
     def _add_picker_to_queue(self, paths: list[Path]):
         """Resolve PSK paths from the picker and add to queue."""
@@ -1146,7 +1429,7 @@ class MainWindow(QMainWindow):
         self._picker_worker.error.connect(self._on_scan_error)
         self._track_worker(self._picker_worker)
         self._queue.set_resolving(True)
-        self._right_tabs.setCurrentIndex(0)
+        self._raise_dock(self._queue_log_dock)
         self._picker_worker.start()
 
     @Slot(object)
@@ -1274,7 +1557,7 @@ class MainWindow(QMainWindow):
         """Reprocess a single asset (overwrites existing .blend)."""
         asset.processed = False
         self._queue.add_to_queue([asset])
-        self._right_tabs.setCurrentIndex(0)
+        self._raise_dock(self._queue_log_dock)
         self._log.append(f"Queued for reprocessing: {asset.name}", "info")
 
     # ------------------------------------------------------------------
@@ -1366,7 +1649,7 @@ class MainWindow(QMainWindow):
         )
 
         self._log.append(f"Re-scanning {len(entries)} incomplete entries...", "info")
-        self._scan_btn.setEnabled(False)
+        self._browser.set_scan_running(True)
         self._statusbar.showMessage(f"Re-scanning {len(entries)} entries...")
 
         self._rescan_worker = RescanWorker(scanner, entries, self)
@@ -1378,7 +1661,7 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int)
     def _on_rescan_finished(self, resolved: int, still_incomplete: int):
-        self._scan_btn.setEnabled(True)
+        self._browser.set_scan_running(False)
         self._browser.refresh_tree()
         msg = f"Re-scan done: {resolved} resolved, {still_incomplete} still incomplete"
         self._log.append(msg, "success" if still_incomplete == 0 else "info")
@@ -1420,6 +1703,10 @@ class MainWindow(QMainWindow):
             self._save_current_profile()
         except Exception:
             log.exception("save_current_profile during shutdown raised")
+
+        # Persist dock layout + window geometry so the next launch reopens
+        # in the same arrangement.
+        self._save_layout()
 
         running_workers = self._running_workers()
         job_running = bool(self._job_manager and self._job_manager.isRunning())

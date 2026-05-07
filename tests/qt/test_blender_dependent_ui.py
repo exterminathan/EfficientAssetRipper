@@ -36,12 +36,10 @@ def main_window_with_blender(qtbot, mock_qsettings, tmp_profiles_dir, mocker):
     return win
 
 
-def test_blend_combiner_tab_disabled_without_blender(main_window_no_blender):
+def test_blend_combiner_dock_disabled_without_blender(main_window_no_blender):
     win = main_window_no_blender
-    idx = win._right_tabs.indexOf(win._combiner)
-    assert idx != -1
-    assert win._right_tabs.isTabEnabled(idx) is False
-    assert "no Blender" in win._right_tabs.tabText(idx)
+    assert win._combiner_dock is not None
+    assert win._combiner_dock.isEnabled() is False
 
 
 def test_process_queue_button_disabled_without_blender(main_window_no_blender):
@@ -62,11 +60,10 @@ def test_tools_blend_combiner_action_disabled_without_blender(main_window_no_ble
     assert win._blend_combiner_action.isEnabled() is False
 
 
-def test_blend_combiner_tab_enabled_with_blender(main_window_with_blender):
+def test_blend_combiner_dock_enabled_with_blender(main_window_with_blender):
     win = main_window_with_blender
-    idx = win._right_tabs.indexOf(win._combiner)
-    assert win._right_tabs.isTabEnabled(idx) is True
-    assert win._right_tabs.tabText(idx) == "Blend Combiner"
+    assert win._combiner_dock.isEnabled() is True
+    assert win._combiner_dock.windowTitle() == "Blend Combiner"
 
 
 def test_process_queue_button_enabled_with_blender(main_window_with_blender):

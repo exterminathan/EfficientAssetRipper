@@ -156,16 +156,11 @@ def main():
     icon = _make_icon()
     app.setWindowIcon(icon)
 
-    # Build the main window (hidden) so it loads during the splash
+    # Build the main window (hidden) so it loads during the splash. Geometry
+    # restoration runs inside MainWindow.__init__ — it falls back to a centred
+    # 1600×950 default when no saved layout exists or the schema mismatches.
     window = MainWindow()
     window.setWindowIcon(icon)
-
-    # Set default size and centre on screen
-    _win_w, _win_h = 1600, 950
-    screen_rect = app.primaryScreen().availableGeometry()
-    _win_x = screen_rect.x() + (screen_rect.width() - _win_w) // 2
-    _win_y = screen_rect.y() + (screen_rect.height() - _win_h) // 2
-    window.setGeometry(_win_x, _win_y, _win_w, _win_h)
 
     if SHOW_SPLASH:
         # Show the main window first so Windows treats it as the active app
@@ -181,9 +176,12 @@ def main():
             window.raise_()
             window.activateWindow()
 
+        # MainWindow has already realised its geometry (saved layout or
+        # default centring) inside __init__, so read the live frame here.
+        _wg = window.frameGeometry()
         splash = SplashScreen(
             finish_callback=_on_splash_done,
-            target_rect=QRect(_win_x, _win_y, _win_w, _win_h),
+            target_rect=QRect(_wg.x(), _wg.y(), _wg.width(), _wg.height()),
         )
         splash.start()
     else:

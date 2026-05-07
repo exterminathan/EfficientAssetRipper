@@ -660,6 +660,28 @@ internal static class Program
         int unmounted = 0;
         try { unmounted = _provider.RequiredKeys.Count(); } catch { }
 
+        // Surface the unmounted archive names + GUIDs so the GUI can offer
+        // a targeted "add the missing key" prompt. Tolerated as best-effort:
+        // older CUE4Parse builds may not expose UnloadedVfs in this shape.
+        var unmountedArchives = new List<object>();
+        try
+        {
+            var unloaded = _provider.UnloadedVfs;
+            if (unloaded != null)
+            {
+                foreach (var vfs in unloaded)
+                {
+                    if (vfs == null) continue;
+                    string name;
+                    string guid;
+                    try { name = vfs.Name ?? string.Empty; } catch { name = string.Empty; }
+                    try { guid = vfs.EncryptionKeyGuid.ToString(); } catch { guid = string.Empty; }
+                    unmountedArchives.Add(new { name, guid });
+                }
+            }
+        }
+        catch { /* older CUE4Parse — fall back to count-only */ }
+
         // Scan for loose files that CUE4Parse doesn't natively discover
         // (.upk, .wem, .ewem, .bnk — common in UE3 games like pre-F2P Rocket League)
         _gameDir = gameDir;
@@ -696,7 +718,8 @@ internal static class Program
             unmounted_count = unmounted,
             file_count = fileCount + _looseFiles.Count,
             loose_file_count = _looseFiles.Count,
-            keys_submitted = keysSubmitted
+            keys_submitted = keysSubmitted,
+            unmounted_archives = unmountedArchives
         });
     }
 

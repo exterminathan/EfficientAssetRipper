@@ -40,6 +40,90 @@ from gui.widgets import CollapsibleSection, PathPicker
 
 log = logging.getLogger(__name__)
 
+
+class AesKeysTableWidget(QWidget):
+    """Reusable AES keys editor (label / GUID / hex key) with Add/Remove buttons.
+
+    Used by the profile dialog and the encrypted-archive prompt so both edit
+    points share one implementation.
+    """
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._table = QTableWidget()
+        self._table.setColumnCount(3)
+        self._table.setHorizontalHeaderLabels(["Label", "GUID", "Key (hex)"])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.verticalHeader().setVisible(False)
+        self._table.itemChanged.connect(self._emit_changed)
+        layout.addWidget(self._table)
+
+        btns = QHBoxLayout()
+        add_btn = QPushButton("Add Key")
+        add_btn.clicked.connect(self._add_row)
+        btns.addWidget(add_btn)
+        rm_btn = QPushButton("Remove Selected")
+        rm_btn.clicked.connect(self._remove_selected)
+        btns.addWidget(rm_btn)
+        btns.addStretch()
+        layout.addLayout(btns)
+
+    @property
+    def table(self) -> QTableWidget:
+        return self._table
+
+    def populate(self, keys: list[dict]):
+        self._table.blockSignals(True)
+        try:
+            self._table.setRowCount(0)
+            for k in keys or []:
+                row = self._table.rowCount()
+                self._table.insertRow(row)
+                self._table.setItem(row, 0, QTableWidgetItem(k.get("label", "")))
+                self._table.setItem(row, 1, QTableWidgetItem(k.get("guid", "")))
+                self._table.setItem(row, 2, QTableWidgetItem(k.get("key", "")))
+        finally:
+            self._table.blockSignals(False)
+
+    def collect(self) -> list[dict]:
+        keys: list[dict] = []
+        for row in range(self._table.rowCount()):
+            label = (self._table.item(row, 0) or QTableWidgetItem()).text().strip()
+            guid = (self._table.item(row, 1) or QTableWidgetItem()).text().strip()
+            key = (self._table.item(row, 2) or QTableWidgetItem()).text().strip()
+            if key:
+                keys.append({"label": label, "guid": guid, "key": key})
+        return keys
+
+    def add_prefilled_row(self, label: str = "Main", guid: str = "00000000000000000000000000000000", key: str = ""):
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        self._table.setItem(row, 0, QTableWidgetItem(label))
+        self._table.setItem(row, 1, QTableWidgetItem(guid))
+        self._table.setItem(row, 2, QTableWidgetItem(key))
+        self._emit_changed()
+
+    def _add_row(self):
+        self.add_prefilled_row()
+
+    def _remove_selected(self):
+        rows = sorted(set(idx.row() for idx in self._table.selectedIndexes()), reverse=True)
+        for row in rows:
+            self._table.removeRow(row)
+        if rows:
+            self._emit_changed()
+
+    def _emit_changed(self, *_):
+        self.changed.emit()
+
 # UE versions exposed in the editor (mirrors gui/unpacker_panel._UE_VERSIONS,
 # but we keep the editor list short for sanity — users can free-type in the
 # unpacker tab if they need an EGame enum value not listed here)
@@ -434,26 +518,9 @@ class _ProfileEditor(QWidget):
         keys_section = CollapsibleSection("AES Keys", start_expanded=False)
         keys_layout = QVBoxLayout()
 
-        self._keys_table = QTableWidget()
-        self._keys_table.setColumnCount(3)
-        self._keys_table.setHorizontalHeaderLabels(["Label", "GUID", "Key (hex)"])
-        self._keys_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self._keys_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        self._keys_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self._keys_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._keys_table.verticalHeader().setVisible(False)
-        self._keys_table.itemChanged.connect(self._on_changed)
+        self._keys_table = AesKeysTableWidget()
+        self._keys_table.changed.connect(self._on_changed)
         keys_layout.addWidget(self._keys_table)
-
-        keys_btns = QHBoxLayout()
-        add_btn = QPushButton("Add Key")
-        add_btn.clicked.connect(self._add_key_row)
-        keys_btns.addWidget(add_btn)
-        rm_btn = QPushButton("Remove Selected")
-        rm_btn.clicked.connect(self._remove_selected_key)
-        keys_btns.addWidget(rm_btn)
-        keys_btns.addStretch()
-        keys_layout.addLayout(keys_btns)
 
         keys_section.set_content_layout(keys_layout)
         outer.addWidget(keys_section)
@@ -558,13 +625,7 @@ class _ProfileEditor(QWidget):
             self._mappings.setText(data.get("mappings_path", ""))
             self._auto_save_chk.setChecked(bool(data.get("auto_save_paths", False)))
 
-            self._keys_table.setRowCount(0)
-            for k in data.get("aes_keys", []) or []:
-                row = self._keys_table.rowCount()
-                self._keys_table.insertRow(row)
-                self._keys_table.setItem(row, 0, QTableWidgetItem(k.get("label", "")))
-                self._keys_table.setItem(row, 1, QTableWidgetItem(k.get("guid", "")))
-                self._keys_table.setItem(row, 2, QTableWidgetItem(k.get("key", "")))
+            self._keys_table.populate(data.get("aes_keys", []) or [])
 
             # Texture-resolution fields. Coerce the preset combo to the saved
             # value, falling back to the default if the saved one is no longer
@@ -590,13 +651,7 @@ class _ProfileEditor(QWidget):
             self._building = False
 
     def collect_data(self) -> dict:
-        keys: list[dict] = []
-        for row in range(self._keys_table.rowCount()):
-            label = (self._keys_table.item(row, 0) or QTableWidgetItem()).text().strip()
-            guid = (self._keys_table.item(row, 1) or QTableWidgetItem()).text().strip()
-            key = (self._keys_table.item(row, 2) or QTableWidgetItem()).text().strip()
-            if key:
-                keys.append({"label": label, "guid": guid, "key": key})
+        keys = self._keys_table.collect()
 
         return {
             "game_dir": self._game_dir.text().strip(),
@@ -641,17 +696,3 @@ class _ProfileEditor(QWidget):
             self._refresh_overrides_label()
             self._on_changed()
 
-    def _add_key_row(self):
-        row = self._keys_table.rowCount()
-        self._keys_table.insertRow(row)
-        self._keys_table.setItem(row, 0, QTableWidgetItem("Main"))
-        self._keys_table.setItem(row, 1, QTableWidgetItem("00000000000000000000000000000000"))
-        self._keys_table.setItem(row, 2, QTableWidgetItem(""))
-        self._on_changed()
-
-    def _remove_selected_key(self):
-        rows = sorted(set(idx.row() for idx in self._keys_table.selectedIndexes()), reverse=True)
-        for row in rows:
-            self._keys_table.removeRow(row)
-        if rows:
-            self._on_changed()

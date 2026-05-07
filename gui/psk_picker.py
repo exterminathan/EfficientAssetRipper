@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 import config
 from core.classifier import classify
 from core.everything import EverythingError, get_sdk
-from gui.widgets import CollapsibleSection, ZoomableTree
+from gui.widgets import CollapsibleSection, ZoomableTree, add_tree_expand_actions
 import gui.theme as theme
 
 
@@ -151,7 +151,11 @@ class PskPickerPanel(QWidget):
         adv_section.set_content_layout(adv_layout)
         layout.addWidget(adv_section)
 
-        # --- Middle area: re-load + expand/collapse + add to queue ---
+        # --- Middle area: re-load + add to queue ---
+        # Tracks last-known filter activity so clearing the filter collapses
+        # the rows we auto-expanded without disturbing user-driven expansions.
+        self._last_filter_active = False
+
         btn_bar = QHBoxLayout()
 
         self._search_btn = QPushButton("Re-load PSK")
@@ -160,11 +164,6 @@ class PskPickerPanel(QWidget):
         btn_bar.addWidget(self._search_btn)
 
         btn_bar.addStretch()
-
-        self._toggle_expand_btn = QPushButton("Expand All")
-        self._expanded = False
-        self._toggle_expand_btn.clicked.connect(self._toggle_expand)
-        btn_bar.addWidget(self._toggle_expand_btn)
 
         self._add_btn = QPushButton("Add to Queue")
         self._add_btn.setToolTip("Resolve selected files and add to the processing queue")
@@ -401,10 +400,15 @@ class PskPickerPanel(QWidget):
 
                     self._item_to_idx[id(leaf)] = file_idx
 
+        filter_active = bool(name_inc or name_exc or folder_inc or folder_exc) or bool(cat_data) or unprocessed_only
+        if filter_active:
+            self._tree.expandAll()
+        elif self._last_filter_active:
+            self._tree.collapseAll()
+        self._last_filter_active = filter_active
+
         self._tree.setUpdatesEnabled(True)
         self._tree.blockSignals(False)
-        if self._expanded or name_inc or name_exc or folder_inc or folder_exc:
-            self._tree.expandAll()
         self._status.setText(
             f"{visible_count} shown / {len(self._all_paths)} total"
         )
@@ -413,17 +417,6 @@ class PskPickerPanel(QWidget):
     # ------------------------------------------------------------------
     # Selection helpers
     # ------------------------------------------------------------------
-
-    def _toggle_expand(self):
-        """Toggle between expanding and collapsing all tree items."""
-        if self._expanded:
-            self._tree.collapseAll()
-            self._toggle_expand_btn.setText("Expand All")
-        else:
-            self._tree.expandAll()
-            self._toggle_expand_btn.setText("Collapse All")
-        self._expanded = not self._expanded
-
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int):
         """Track check-state changes in _checked_paths."""
@@ -445,36 +438,36 @@ class PskPickerPanel(QWidget):
 
     def _show_context_menu(self, pos):
         item = self._tree.itemAt(pos)
-        if item is None:
-            return
         self._popup_context_menu(item, self._tree.viewport().mapToGlobal(pos))
 
-    def _popup_context_menu(self, item: QTreeWidgetItem, global_pos):
+    def _popup_context_menu(self, item: QTreeWidgetItem | None, global_pos):
         """Build and show the right-click menu for *item*. Split out from
         `_show_context_menu` so tests can drive it directly without poking
         the QTreeWidget's internal hit-testing."""
-        idx = self._item_to_idx.get(id(item))
-        if idx is None:
-            return  # category / subcategory header — no PSK to act on
-        psk_path = self._all_paths[idx]
-
         menu = QMenu(self)
 
-        act_preview = QAction("Preview Mesh", self)
-        act_preview.triggered.connect(
-            lambda checked=False, p=psk_path: self.mesh_preview_requested.emit(str(p))
-        )
-        menu.addAction(act_preview)
+        idx = self._item_to_idx.get(id(item)) if item is not None else None
+        if idx is not None:
+            psk_path = self._all_paths[idx]
 
-        act_reveal = QAction("Open containing folder", self)
-        act_reveal.triggered.connect(
-            lambda checked=False, p=psk_path: QDesktopServices.openUrl(
-                QUrl.fromLocalFile(str(p.parent))
+            act_preview = QAction("Preview Mesh", self)
+            act_preview.triggered.connect(
+                lambda checked=False, p=psk_path: self.mesh_preview_requested.emit(str(p))
             )
-        )
-        menu.addAction(act_reveal)
+            menu.addAction(act_preview)
 
-        menu.exec(global_pos)
+            act_reveal = QAction("Open containing folder", self)
+            act_reveal.triggered.connect(
+                lambda checked=False, p=psk_path: QDesktopServices.openUrl(
+                    QUrl.fromLocalFile(str(p.parent))
+                )
+            )
+            menu.addAction(act_reveal)
+
+        add_tree_expand_actions(menu, self._tree, item)
+
+        if menu.actions():
+            menu.exec(global_pos)
 
     def _walk_leaves(self, parent: QTreeWidgetItem, out: list[int]):
         for i in range(parent.childCount()):

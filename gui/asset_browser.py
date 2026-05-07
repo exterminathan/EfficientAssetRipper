@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 import config
 from core.asset_scanner import AssetEntry
-from gui.widgets import CollapsibleSection, ZoomableTree
+from gui.widgets import CollapsibleSection, ZoomableTree, add_tree_expand_actions
 import gui.theme as theme
 
 
@@ -253,6 +253,8 @@ class AssetBrowser(QWidget):
     delete_requested = Signal(list)  # list[AssetEntry] to remove from cache
     mesh_preview_requested = Signal(object)   # AssetEntry — open in Mesh Preview tab
     props_view_requested = Signal(object)     # AssetEntry — open .props.txt in Text Viewer
+    scan_requested = Signal()                 # user clicked Scan Game Folder
+    cancel_scan_requested = Signal()          # user clicked Cancel Scan
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -302,14 +304,26 @@ class AssetBrowser(QWidget):
         adv_section.set_content_layout(adv_layout)
         layout.addWidget(adv_section)
 
-        # --- Middle area: expand/collapse + add to queue ---
-        btn_bar = QHBoxLayout()
-        btn_bar.addStretch()
+        # --- Middle area: add to queue ---
+        # Tracks nodes we auto-expanded so we can restore them when the filter
+        # is cleared without re-opening anything the user manually collapsed.
+        self._auto_expanded: set[int] = set()
+        self._user_collapsed: set[int] = set()
+        self._last_filter_active = False
 
-        self._toggle_expand_btn = QPushButton("Expand All")
-        self._expanded = False
-        self._toggle_expand_btn.clicked.connect(self._toggle_expand)
-        btn_bar.addWidget(self._toggle_expand_btn)
+        btn_bar = QHBoxLayout()
+
+        self._scan_btn = QPushButton("Scan Game Folder")
+        self._scan_btn.setToolTip("Walk the configured game folder and resolve every PSK/PSKX asset")
+        self._scan_btn.clicked.connect(self.scan_requested.emit)
+        btn_bar.addWidget(self._scan_btn)
+
+        self._cancel_scan_btn = QPushButton("Cancel Scan")
+        self._cancel_scan_btn.setEnabled(False)
+        self._cancel_scan_btn.clicked.connect(self.cancel_scan_requested.emit)
+        btn_bar.addWidget(self._cancel_scan_btn)
+
+        btn_bar.addStretch()
 
         self._add_queue_btn = QPushButton("Add to Queue")
         self._add_queue_btn.setToolTip("Add checked assets to the processing queue")
@@ -476,9 +490,17 @@ class AssetBrowser(QWidget):
 
                     self._item_to_idx[id(leaf)] = asset_idx
 
-        self._tree.setUpdatesEnabled(True)
-        if self._expanded or filter_text:
+        filter_active = bool(filter_text) or bool(cat_data) or status_data != "all"
+        if filter_active:
             self._tree.expandAll()
+            self._auto_expanded = {id(self._tree.topLevelItem(i)) for i in range(self._tree.topLevelItemCount())}
+        elif self._last_filter_active:
+            # Filter just cleared — collapse anything we auto-expanded.
+            self._tree.collapseAll()
+            self._auto_expanded.clear()
+        self._last_filter_active = filter_active
+
+        self._tree.setUpdatesEnabled(True)
 
         self._status.setText(
             f"{visible_count} assets shown ({ready_count} ready) "
@@ -501,56 +523,43 @@ class AssetBrowser(QWidget):
                         out.append(self._assets[idx])
 
     # ------------------------------------------------------------------
-    # Expand / collapse toggle
-    # ------------------------------------------------------------------
-
-    def _toggle_expand(self):
-        if self._expanded:
-            self._tree.collapseAll()
-            self._toggle_expand_btn.setText("Expand All")
-        else:
-            self._tree.expandAll()
-            self._toggle_expand_btn.setText("Collapse All")
-        self._expanded = not self._expanded
-
-
-    # ------------------------------------------------------------------
     # Context menu
     # ------------------------------------------------------------------
 
     def _show_context_menu(self, pos):
         item = self._tree.itemAt(pos)
-        if item is None:
-            return
-        idx = self._item_to_idx.get(id(item))
-        if idx is None:
-            return
-
-        asset = self._assets[idx]
         menu = QMenu(self)
 
-        act_mesh = QAction("Preview Mesh", self)
-        act_mesh.setEnabled(asset.psk_path.is_file())
-        if not act_mesh.isEnabled():
-            act_mesh.setToolTip("PSK file is missing on disk")
-        act_mesh.triggered.connect(lambda: self.mesh_preview_requested.emit(asset))
-        menu.addAction(act_mesh)
+        idx = self._item_to_idx.get(id(item)) if item is not None else None
 
-        act_props = QAction("Preview Properties", self)
-        props_path = asset.psk_path.with_suffix(".props.txt")
-        act_props.setEnabled(props_path.is_file())
-        if not act_props.isEnabled():
-            act_props.setToolTip("No .props.txt next to this PSK")
-        act_props.triggered.connect(lambda: self.props_view_requested.emit(asset))
-        menu.addAction(act_props)
+        if idx is not None:
+            asset = self._assets[idx]
 
-        menu.addSeparator()
+            act_mesh = QAction("Preview Mesh", self)
+            act_mesh.setEnabled(asset.psk_path.is_file())
+            if not act_mesh.isEnabled():
+                act_mesh.setToolTip("PSK file is missing on disk")
+            act_mesh.triggered.connect(lambda: self.mesh_preview_requested.emit(asset))
+            menu.addAction(act_mesh)
 
-        act_delete = QAction("Remove from list / cache", self)
-        act_delete.triggered.connect(lambda: self._delete_assets([asset]))
-        menu.addAction(act_delete)
+            act_props = QAction("Preview Properties", self)
+            props_path = asset.psk_path.with_suffix(".props.txt")
+            act_props.setEnabled(props_path.is_file())
+            if not act_props.isEnabled():
+                act_props.setToolTip("No .props.txt next to this PSK")
+            act_props.triggered.connect(lambda: self.props_view_requested.emit(asset))
+            menu.addAction(act_props)
 
-        menu.exec(self._tree.viewport().mapToGlobal(pos))
+            menu.addSeparator()
+
+            act_delete = QAction("Remove from list / cache", self)
+            act_delete.triggered.connect(lambda: self._delete_assets([asset]))
+            menu.addAction(act_delete)
+
+        add_tree_expand_actions(menu, self._tree, item)
+
+        if menu.actions():
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
         """Left-click on a leaf row → open its .props.txt in the Text Viewer.
@@ -602,3 +611,8 @@ class AssetBrowser(QWidget):
     def refresh_tree(self):
         """Rebuild the tree to reflect updated asset data (e.g. after re-scan)."""
         self._rebuild_tree()
+
+    def set_scan_running(self, running: bool) -> None:
+        """Toggle the scan / cancel-scan button enabled state."""
+        self._scan_btn.setEnabled(not running)
+        self._cancel_scan_btn.setEnabled(running)
