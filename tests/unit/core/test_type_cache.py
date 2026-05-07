@@ -25,6 +25,7 @@ def test_category_for_export_type_known_buckets():
     # through to CATEGORY_OTHER.
     assert tc.category_for_export_type("SoundCue") == tc.CATEGORY_OTHER
     assert tc.category_for_export_type("AkAudioEvent") == tc.CATEGORY_OTHER
+    assert tc.category_for_export_type("FileMediaSource") == tc.CATEGORY_VIDEO
     assert tc.category_for_export_type("Material") == tc.CATEGORY_MATERIAL
     assert tc.category_for_export_type("MaterialInstanceConstant") == tc.CATEGORY_MATERIAL
     assert tc.category_for_export_type("AnimSequence") == tc.CATEGORY_ANIMATION
@@ -37,9 +38,10 @@ def test_category_for_export_type_unknown_falls_to_other():
     assert tc.category_for_export_type("Blueprint") == tc.CATEGORY_OTHER
 
 
-def test_all_categories_includes_other():
+def test_all_categories_includes_video():
+    assert tc.CATEGORY_VIDEO in tc.ALL_CATEGORIES
     assert tc.CATEGORY_OTHER in tc.ALL_CATEGORIES
-    assert len(tc.ALL_CATEGORIES) == 6
+    assert len(tc.ALL_CATEGORIES) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +286,14 @@ def test_category_for_asset_type_recognizes_heuristic_audio_strings():
     assert tc.category_for_asset_type("WwiseAsset") == tc.CATEGORY_AUDIO
     assert tc.category_for_asset_type("AkAudioEvent") == tc.CATEGORY_AUDIO
     assert tc.category_for_asset_type("AkMediaAsset") == tc.CATEGORY_AUDIO
+
+
+def test_category_for_asset_type_recognizes_heuristic_video_strings():
+    """Heuristic video types — only FileMediaSource is exportable today, but
+    the others still belong in CATEGORY_VIDEO so the filter UI lights up."""
+    for t in ("FileMediaSource", "PlatformMediaSource",
+              "StreamMediaSource", "ImgMediaSource"):
+        assert tc.category_for_asset_type(t) == tc.CATEGORY_VIDEO, t
 
 
 def test_category_for_asset_type_unknown_falls_back_to_other():

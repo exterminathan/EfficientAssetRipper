@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Unified Media Preview tab — replaces the Audio Preview tab, plays both
+  audio and video with one auto-switching player, side-by-side per-kind
+  history.
+- Video export — `FileMediaSource` resolves its embedded `FilePath` to a
+  VFS entry; raw `.bk2/.mp4/.webm/.mov` leaves extract byte-for-byte.
+- Bink (`.bk2`) and other Qt-undecodable formats fall back to an Open
+  Folder shortcut so the asset is still recoverable.
 - Rewrote legal language across README, in-app About dialog, and first-run
   wizard for clarity around jurisdiction, responsibility, and Unreal Engine
   trademarks. No license change.

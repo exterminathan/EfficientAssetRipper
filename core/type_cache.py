@@ -31,6 +31,7 @@ _DEFAULT_CACHE_DIR = _base_dir() / "cache"
 MESH_EXPORT_TYPES = frozenset({"SkeletalMesh", "StaticMesh"})
 TEXTURE_EXPORT_TYPES = frozenset({"Texture2D", "TextureCube", "Texture2DArray"})
 AUDIO_EXPORT_TYPES = frozenset({"SoundWave"})
+VIDEO_EXPORT_TYPES = frozenset({"FileMediaSource"})
 MATERIAL_EXPORT_TYPES = frozenset({
     "Material", "MaterialInstance", "MaterialInstanceConstant", "MaterialInterface",
 })
@@ -41,6 +42,7 @@ ANIMATION_EXPORT_TYPES = frozenset({
 CATEGORY_MESH = "mesh"
 CATEGORY_TEXTURE = "texture"
 CATEGORY_AUDIO = "audio"
+CATEGORY_VIDEO = "video"
 CATEGORY_MATERIAL = "material"
 CATEGORY_ANIMATION = "animation"
 CATEGORY_OTHER = "other"
@@ -49,6 +51,7 @@ ALL_CATEGORIES: frozenset[str] = frozenset({
     CATEGORY_MESH,
     CATEGORY_TEXTURE,
     CATEGORY_AUDIO,
+    CATEGORY_VIDEO,
     CATEGORY_MATERIAL,
     CATEGORY_ANIMATION,
     CATEGORY_OTHER,
@@ -56,13 +59,15 @@ ALL_CATEGORIES: frozenset[str] = frozenset({
 
 
 def category_for_export_type(export_type: str) -> str:
-    """Map a single UE class name to one of the six categories."""
+    """Map a single UE class name to one of the seven categories."""
     if export_type in MESH_EXPORT_TYPES:
         return CATEGORY_MESH
     if export_type in TEXTURE_EXPORT_TYPES:
         return CATEGORY_TEXTURE
     if export_type in AUDIO_EXPORT_TYPES:
         return CATEGORY_AUDIO
+    if export_type in VIDEO_EXPORT_TYPES:
+        return CATEGORY_VIDEO
     if export_type in MATERIAL_EXPORT_TYPES:
         return CATEGORY_MATERIAL
     if export_type in ANIMATION_EXPORT_TYPES:
@@ -78,6 +83,15 @@ def category_for_export_type(export_type: str) -> str:
 _HEURISTIC_AUDIO_TYPES = frozenset({"Audio", "EncryptedAudio", "SoundBank",
                                     "WwiseAsset", "AkAudioEvent", "AkMediaAsset"})
 
+# Heuristic catch for video-bearing UE classes. We only export
+# FileMediaSource today, but PlatformMediaSource / StreamMediaSource /
+# ImgMediaSource still belong in CATEGORY_VIDEO so the filter UI lights
+# them up correctly. Classification is read-only here.
+_HEURISTIC_VIDEO_TYPES = frozenset({
+    "FileMediaSource", "PlatformMediaSource",
+    "StreamMediaSource", "ImgMediaSource",
+})
+
 
 def category_for_asset_type(asset_type: str) -> str:
     """Map a CLI heuristic asset_type to a category.
@@ -88,6 +102,8 @@ def category_for_asset_type(asset_type: str) -> str:
     """
     if asset_type in _HEURISTIC_AUDIO_TYPES:
         return CATEGORY_AUDIO
+    if asset_type in _HEURISTIC_VIDEO_TYPES:
+        return CATEGORY_VIDEO
     return category_for_export_type(asset_type)
 
 

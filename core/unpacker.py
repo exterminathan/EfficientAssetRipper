@@ -16,6 +16,11 @@ log = logging.getLogger(__name__)
 # either a runaway export listing or a corrupt stream.
 _MAX_NDJSON_LINE_BYTES = 16 * 1024 * 1024  # 16 MB
 
+# VFS leaf extensions we treat as raw playable video — exported byte-for-byte
+# without going through a UObject. The .bk2 case isn't decodable by Qt but is
+# still extracted so the user can drag it into a dedicated player.
+RAW_VIDEO_EXTENSIONS: tuple[str, ...] = (".bk2", ".mp4", ".webm", ".mov")
+
 
 class UnpackerProcess(QObject):
     """Persistent subprocess wrapper around CUE4ParseCLI.exe.
@@ -134,7 +139,7 @@ class UnpackerProcess(QObject):
             "paths": asset_paths,
             "output_dir": output_dir,
             "formats": formats or {"mesh": True, "texture": True, "props": True,
-                                   "animation": True, "audio": True},
+                                   "animation": True, "audio": True, "video": True},
             "texture_format": texture_format,
             "audio_format": audio_format,
         })
@@ -148,7 +153,7 @@ class UnpackerProcess(QObject):
             "path": vfs_path,
             "output_dir": output_dir,
             "formats": formats or {"mesh": True, "texture": True, "props": True,
-                                   "animation": True, "audio": True},
+                                   "animation": True, "audio": True, "video": True},
             "texture_format": texture_format,
             "audio_format": audio_format,
         })
@@ -184,6 +189,21 @@ class UnpackerProcess(QObject):
             "cmd": "export_wwise_audio",
             "output_dir": output_dir,
             "audio_format": audio_format,
+            "entries": entries,
+        })
+
+    def export_video(self, entries: list[dict], output_dir: str) -> None:
+        """Export video assets — FileMediaSource UObjects or raw video leaves.
+
+        Each entry must carry ``vfs_path`` plus a ``kind`` of either
+        ``"file_media_source"`` (resolve UObject → embedded FilePath → bytes)
+        or ``"raw_video"`` (TrySaveAsset on the leaf path directly). The CLI
+        replies with the same ``export_done`` payload other export commands
+        produce.
+        """
+        self._send({
+            "cmd": "export_video",
+            "output_dir": output_dir,
             "entries": entries,
         })
 

@@ -117,6 +117,10 @@ def test_classify_row_extension_fallbacks(qtbot):
         ("/Game/M.pskx", "mesh"),
         ("/Game/A.wav", "audio"),
         ("/Game/A.wem", "audio"),
+        ("/Game/V.mp4", "video"),
+        ("/Game/V.webm", "video"),
+        ("/Game/V.mov", "video"),
+        ("/Game/V.bk2", "video"),
         # Unexpanded packages classify as "package"; the context menu then
         # consults the type cache (when populated) to decide which preview
         # kinds to offer — see the menu tests below.
@@ -128,6 +132,13 @@ def test_classify_row_extension_fallbacks(qtbot):
     for vfs, expected in cases:
         item = _make_row(p, vfs)
         assert p._classify_row(item) == expected, f"{vfs} → {expected}"
+
+
+def test_classify_row_export_type_video(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Movie.uasset", export_type="FileMediaSource")
+    assert p._classify_row(item) == "video"
 
 
 # ---------------------------------------------------------------------------
@@ -169,16 +180,33 @@ def test_on_export_done_dispatches_texture_kind(qtbot, tmp_path: Path):
 def test_on_export_done_dispatches_audio_kind(qtbot, tmp_path: Path):
     p = UnpackerPanel()
     qtbot.addWidget(p)
-    p._audio_preview_temp_dir = tmp_path
-    wav = tmp_path / "Game" / "Foo.wav"
+    # Audio temp dir lives under <media_temp>/audio so per-kind Clear works.
+    (tmp_path / "audio").mkdir(parents=True, exist_ok=True)
+    p._media_preview_temp_dir = tmp_path
+    wav = tmp_path / "audio" / "Game" / "Foo.wav"
     wav.parent.mkdir(parents=True, exist_ok=True)
     wav.write_bytes(b"")
     p._pending_temp_preview = (str(wav), "audio", "/Game/Foo.uasset")
     p._exporting = True
 
-    with qtbot.waitSignal(p.audio_preview, timeout=2000) as blocker:
+    with qtbot.waitSignal(p.media_preview, timeout=2000) as blocker:
         p._on_export_done([str(wav)], [])
     assert blocker.args[0] == str(wav)
+
+
+def test_on_export_done_dispatches_video_kind(qtbot, tmp_path: Path):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    (tmp_path / "video").mkdir(parents=True, exist_ok=True)
+    p._media_preview_temp_dir = tmp_path
+    mp4 = tmp_path / "video" / "Foo.mp4"
+    mp4.write_bytes(b"")
+    p._pending_temp_preview = (str(mp4), "video", "/Game/Foo.uasset")
+    p._exporting = True
+
+    with qtbot.waitSignal(p.media_preview, timeout=2000) as blocker:
+        p._on_export_done([str(mp4)], [])
+    assert blocker.args[0] == str(mp4)
 
 
 def test_on_export_done_extension_swap_fallback(qtbot, tmp_path: Path):
@@ -226,7 +254,7 @@ def test_kick_temp_export_builds_correct_formats_dict(qtbot, tmp_path: Path, mon
     assert captured["output_dir"] == str(tmp_path)
     assert captured["formats"] == {
         "mesh": True, "texture": False, "props": False,
-        "animation": False, "audio": False,
+        "animation": False, "audio": False, "video": False,
     }
     assert p._pending_temp_preview is not None
     expected_path, kind, vfs_path = p._pending_temp_preview
@@ -255,13 +283,45 @@ def test_kick_temp_export_refuses_when_not_mounted(qtbot):
 
 def test_menu_for_unexpanded_uasset_offers_all_preview_kinds(qtbot):
     """An unexpanded .uasset with no type cache could be anything; the menu
-    must offer all three preview kinds so the user doesn't have to expand
+    must offer all four preview kinds so the user doesn't have to expand
     first. (Cached cases are exercised below.)"""
     p = UnpackerPanel()
     qtbot.addWidget(p)
     item = _make_row(p, "/Game/Foo.uasset")
     actions = _capture_menu_actions(p, item)
-    assert actions == ["Preview Mesh", "Preview Texture", "Preview Audio", "Preview Properties"]
+    assert actions == [
+        "Preview Mesh", "Preview Texture", "Preview Audio", "Preview Video",
+        "Preview Properties",
+    ]
+
+
+def test_menu_for_loose_video_file(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Movies/Intro.bk2")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Video", "Preview Properties"]
+
+
+def test_menu_for_expanded_file_media_source(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    item = _make_row(p, "/Game/Movie.uasset", export_type="FileMediaSource")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Video", "Preview Properties"]
+
+
+def test_menu_for_unexpanded_uasset_uses_type_cache_video_only(qtbot):
+    p = UnpackerPanel()
+    qtbot.addWidget(p)
+    p._type_cache = TypeCache()
+    p._type_cache.add_batch([{
+        "path": "/Game/Movie.uasset",
+        "exports": [{"name": "Intro", "export_type": "FileMediaSource"}],
+    }])
+    item = _make_row(p, "/Game/Movie.uasset")
+    actions = _capture_menu_actions(p, item)
+    assert actions == ["Preview Video", "Preview Properties"]
 
 
 def _populate_type_cache(panel: UnpackerPanel, vfs_path: str, export_type: str) -> None:

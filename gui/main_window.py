@@ -37,7 +37,7 @@ from core.profile_manager import ProfileLoadError, ProfileManager
 from gui.asset_browser import AssetBrowser
 from gui.blend_combiner import BlendCombinerPanel
 from gui.tga_previewer import TGAPreviewerPanel
-from gui.audio_previewer import AudioPreviewerPanel
+from gui.media_previewer import MediaPreviewerPanel
 from gui.mesh_previewer import MeshPreviewerPanel
 from gui.log_viewer import LogViewer
 from gui.profile_bar import ProfileBar
@@ -372,9 +372,9 @@ class MainWindow(QMainWindow):
         self._text_viewer = TextViewer()
         self._right_tabs.addTab(self._text_viewer, "Text Viewer")
 
-        # Tab 5: Audio Preview
-        self._audio_previewer = AudioPreviewerPanel()
-        self._right_tabs.addTab(self._audio_previewer, "Audio Preview")
+        # Tab 5: Media Preview (audio + video)
+        self._media_previewer = MediaPreviewerPanel()
+        self._right_tabs.addTab(self._media_previewer, "Media Preview")
 
         # Tab 6: Mesh Preview
         self._mesh_previewer = MeshPreviewerPanel()
@@ -412,14 +412,14 @@ class MainWindow(QMainWindow):
         self._unpacker_panel.log_message.connect(self._log.append)
         self._unpacker_panel.version_mismatch.connect(self._log.show_alert)
         self._unpacker_panel.props_viewed.connect(self._show_in_text_viewer)
-        self._unpacker_panel.audio_preview.connect(self._on_audio_preview)
+        self._unpacker_panel.media_preview.connect(self._on_media_preview)
         self._unpacker_panel.tga_preview.connect(self._on_tga_preview)
         self._unpacker_panel.mesh_preview.connect(self._on_mesh_preview)
 
         # Give the unpacker access to each previewer's temp directory so it
         # can drop preview-only exports there instead of the user's real
         # output folder.
-        self._unpacker_panel._audio_preview_temp_dir = self._audio_previewer.temp_dir
+        self._unpacker_panel._media_preview_temp_dir = self._media_previewer.temp_dir
         self._unpacker_panel._mesh_preview_temp_dir = self._mesh_previewer.temp_dir
         self._unpacker_panel._tga_preview_temp_dir = self._tga_previewer.temp_dir
 
@@ -428,10 +428,10 @@ class MainWindow(QMainWindow):
         self._text_viewer.show_text(title, text)
         self._right_tabs.setCurrentWidget(self._text_viewer)
 
-    def _on_audio_preview(self, path: str):
-        """Load audio file in the Audio Preview tab and switch to it."""
-        self._audio_previewer.load_file(path)
-        self._right_tabs.setCurrentWidget(self._audio_previewer)
+    def _on_media_preview(self, path: str):
+        """Load audio or video file in the Media Preview tab and switch to it."""
+        self._media_previewer.load_file(path)
+        self._right_tabs.setCurrentWidget(self._media_previewer)
 
     def _on_tga_preview(self, path: str):
         """Load image file in the TGA Previewer tab and switch to it."""
@@ -491,7 +491,7 @@ class MainWindow(QMainWindow):
         self._tab_actions = {}
         for tabs, names in [
             (self._left_tabs, ["Asset Browser", "PSK Picker", "Unpacker"]),
-            (self._right_tabs, ["Queue / Log", "Blend Combiner", "TGA Previewer", "Text Viewer", "Audio Preview"]),
+            (self._right_tabs, ["Queue / Log", "Blend Combiner", "TGA Previewer", "Text Viewer", "Media Preview"]),
         ]:
             for i, name in enumerate(names):
                 action = window_menu.addAction(name)

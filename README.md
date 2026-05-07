@@ -332,7 +332,7 @@ EfficientAssetRipper/
 ├── gui/                     # PySide6 UI
 │   ├── main_window.py       # Central window orchestrator
 │   ├── asset_browser.py     # Hierarchical asset tree with filtering
-│   ├── audio_previewer.py   # Audio playback panel
+│   ├── media_previewer.py   # Unified audio + video playback panel
 │   ├── blend_combiner.py    # Multi-blend merge tool
 │   ├── color_schemes.py     # Built-in + custom color scheme registry
 │   ├── log_viewer.py        # Color-coded log display

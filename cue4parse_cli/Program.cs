@@ -237,8 +237,8 @@ internal static class Program
             Console.WriteLine("Replies are emitted to stdout as one JSON object per line.");
             Console.WriteLine("Commands: init, browse, export, export_folder, inspect,");
             Console.WriteLine("          list_exports, get_props, scan_wwise_events,");
-            Console.WriteLine("          scan_types, export_wwise_audio, rebuild_wem_cache,");
-            Console.WriteLine("          cancel, quit");
+            Console.WriteLine("          scan_types, export_wwise_audio, export_video,");
+            Console.WriteLine("          rebuild_wem_cache, cancel, quit");
             return;
         }
 
@@ -332,6 +332,9 @@ internal static class Program
                         break;
                     case "export_wwise_audio":
                         await RunExportWithCancelSupport(reader, () => HandleExportWwiseAudio(cmd));
+                        break;
+                    case "export_video":
+                        await RunExportWithCancelSupport(reader, () => HandleExportVideo(cmd));
                         break;
                     case "cancel":
                         _cts.Cancel();
@@ -1157,6 +1160,15 @@ internal static class Program
                         exported |= ExportProps(mat, nestedOutputDir);
                         break;
                 }
+
+                // FileMediaSource isn't a typed CUE4Parse UObject we can match
+                // via `case U…`, but its export_type is stable. Resolve the
+                // embedded FilePath against the VFS and write the bytes flat.
+                if (obj.ExportType == "FileMediaSource" &&
+                    formats.GetValueOrDefault("video", true))
+                {
+                    exported |= ExportFileMediaSource(gamePath, nestedOutputDir);
+                }
             }
             catch (Exception ex)
             {
@@ -1241,6 +1253,27 @@ internal static class Program
         }
 
         var outPath = SafeJoin(nestedOutputDir, name);
+        File.WriteAllBytes(outPath, data);
+        return true;
+    }
+
+    // ─── FileMediaSource export ───────────────────────────────────────
+    private static bool ExportFileMediaSource(string gamePath, string outputDir)
+    {
+        var resolved = ResolveFileMediaSource(gamePath, out var err);
+        if (resolved == null)
+        {
+            Respond(new { type = "warning", message = $"{Path.GetFileName(gamePath)}: {err ?? "FileMediaSource resolve failed"}" });
+            return false;
+        }
+        if (!_provider!.TrySaveAsset(resolved, out var data) || data == null)
+        {
+            Respond(new { type = "warning", message = $"{Path.GetFileName(gamePath)}: resolved {resolved} not in VFS" });
+            return false;
+        }
+        var name = SanitizeName(Path.GetFileName(resolved));
+        if (string.IsNullOrEmpty(name)) return false;
+        var outPath = SafeJoin(outputDir, name);
         File.WriteAllBytes(outPath, data);
         return true;
     }
@@ -2243,6 +2276,203 @@ internal static class Program
 
         Respond(new { type = "export_done", succeeded, failed, total = entries.Count });
         return Task.CompletedTask;
+    }
+
+    // ─── Export video (FileMediaSource + raw video files) ─────────────
+
+    /// <summary>
+    /// Export movie assets — either FileMediaSource UObjects (resolves the
+    /// embedded FilePath reference to a VFS path before writing) or raw
+    /// video leaves (.bk2/.mp4/.webm/.mov, written byte-for-byte).
+    ///
+    /// Each entry is { vfs_path, kind } where kind is "file_media_source"
+    /// or "raw_video". Replies with the standard export_done payload.
+    /// </summary>
+    private static Task HandleExportVideo(JObject cmd)
+    {
+        EnsureProvider();
+        var outputDir = cmd.Value<string>("output_dir") ?? throw new ArgumentException("output_dir required");
+        var entries = cmd["entries"] as JArray ?? throw new ArgumentException("entries required");
+
+        Directory.CreateDirectory(outputDir);
+
+        int total = entries.Count, current = 0;
+        var succeeded = new List<string>();
+        var failed = new List<object>();
+
+        Respond(new { type = "progress", current = 0, total, message = $"Exporting {total} video file(s)..." });
+
+        foreach (var entry in entries)
+        {
+            if (_cts.Token.IsCancellationRequested) break;
+            current++;
+
+            var vfsPath = entry.Value<string>("vfs_path") ?? "";
+            var kind = (entry.Value<string>("kind") ?? "raw_video").ToLowerInvariant();
+            if (string.IsNullOrEmpty(vfsPath))
+            {
+                failed.Add(new { path = vfsPath, error = "Empty vfs_path" });
+                continue;
+            }
+
+            if (current % 5 == 0 || current == total)
+                Respond(new { type = "progress", current, total, message = $"Exporting video: {Path.GetFileName(vfsPath)}" });
+
+            try
+            {
+                if (kind == "raw_video")
+                {
+                    if (!_provider!.TrySaveAsset(vfsPath, out var data) || data == null)
+                    {
+                        failed.Add(new { path = vfsPath, error = "File not found in VFS" });
+                        continue;
+                    }
+                    var name = SanitizeName(Path.GetFileName(vfsPath));
+                    if (string.IsNullOrEmpty(name))
+                    {
+                        failed.Add(new { path = vfsPath, error = "Invalid filename" });
+                        continue;
+                    }
+                    var outPath = SafeJoin(outputDir, name);
+                    File.WriteAllBytes(outPath, data);
+                    succeeded.Add(outPath);
+                    continue;
+                }
+
+                if (kind == "file_media_source")
+                {
+                    var resolved = ResolveFileMediaSource(vfsPath, out var resolveErr);
+                    if (resolved == null)
+                    {
+                        failed.Add(new { path = vfsPath, error = resolveErr ?? "FileMediaSource resolution failed" });
+                        continue;
+                    }
+                    if (!_provider!.TrySaveAsset(resolved, out var data) || data == null)
+                    {
+                        failed.Add(new { path = vfsPath, error = $"Resolved file not found: {resolved}" });
+                        continue;
+                    }
+                    var name = SanitizeName(Path.GetFileName(resolved));
+                    if (string.IsNullOrEmpty(name))
+                    {
+                        failed.Add(new { path = vfsPath, error = "Invalid filename after resolve" });
+                        continue;
+                    }
+                    var outPath = SafeJoin(outputDir, name);
+                    File.WriteAllBytes(outPath, data);
+                    succeeded.Add(outPath);
+                    continue;
+                }
+
+                failed.Add(new { path = vfsPath, error = $"Unknown video kind: {kind}" });
+            }
+            catch (Exception ex)
+            {
+                failed.Add(new { path = vfsPath, error = SanitizeMessage(ex.Message) });
+            }
+        }
+
+        Respond(new { type = "export_done", succeeded, failed, total = entries.Count });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Load <paramref name="assetPath"/> as a UObject, look up its FileMediaSource
+    /// FilePath (UE FFilePath struct), and resolve it against the VFS using
+    /// (1) literal match, (2) Movies/&lt;basename&gt;, (3) Movies/**/&lt;basename&gt; glob.
+    /// Returns the resolved VFS path, or null + sets <paramref name="error"/>.
+    /// </summary>
+    private static string? ResolveFileMediaSource(string assetPath, out string? error)
+    {
+        error = null;
+        try
+        {
+            var lower = assetPath.ToLowerInvariant();
+            string objectPath = assetPath;
+            foreach (var ext in new[] { ".uasset", ".umap", ".ubulk" })
+            {
+                if (objectPath.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                {
+                    objectPath = objectPath[..^ext.Length];
+                    break;
+                }
+            }
+
+            var pkg = _provider!.LoadPackage(objectPath);
+            if (pkg == null)
+            {
+                error = "Package failed to load";
+                return null;
+            }
+
+            string? filePath = null;
+            foreach (var obj in pkg.GetExports())
+            {
+                if (obj.ExportType != "FileMediaSource") continue;
+
+                // Serialize on a bounded-stack thread (mirrors WWise scan).
+                var jObj = RunOnBoundedThread(() =>
+                {
+                    var settings = new Newtonsoft.Json.JsonSerializerSettings
+                    {
+                        Formatting = Formatting.None,
+                        ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+                        MaxDepth = 32,
+                        TypeNameHandling = TypeNameHandling.None,
+                        Error = (_, args) => args.ErrorContext.Handled = true
+                    };
+                    var json = JsonConvert.SerializeObject(obj, settings);
+                    return JObject.Parse(json);
+                }, 5_000, out _);
+
+                if (jObj == null) continue;
+                // FFilePath comes through as `{ FilePath: { FilePath: "..." } }`.
+                filePath = jObj.SelectToken("FilePath.FilePath")?.Value<string>()
+                            ?? jObj.SelectToken("FilePath")?.Value<string>();
+                if (!string.IsNullOrEmpty(filePath)) break;
+            }
+
+            if (string.IsNullOrEmpty(filePath))
+            {
+                error = "FilePath not found on FileMediaSource";
+                return null;
+            }
+
+            // 1. Literal match (sometimes the path is already VFS-rooted).
+            var normalized = filePath.Replace('\\', '/').TrimStart('/');
+            if (_provider.Files.ContainsKey(normalized))
+                return normalized;
+
+            var basename = Path.GetFileName(normalized);
+            if (string.IsNullOrEmpty(basename))
+            {
+                error = "FilePath has no basename";
+                return null;
+            }
+
+            // 2. Movies/<basename>
+            foreach (var key in _provider.Files.Keys)
+            {
+                if (key.EndsWith("/" + basename, StringComparison.OrdinalIgnoreCase) &&
+                    key.Contains("/Movies/", StringComparison.OrdinalIgnoreCase))
+                    return key;
+            }
+
+            // 3. Any **/<basename> match — last resort so a renamed Movies folder still works.
+            foreach (var key in _provider.Files.Keys)
+            {
+                if (key.EndsWith("/" + basename, StringComparison.OrdinalIgnoreCase))
+                    return key;
+            }
+
+            error = $"No VFS entry matched basename {basename}";
+            return null;
+        }
+        catch (Exception ex)
+        {
+            error = SanitizeMessage(ex.Message);
+            return null;
+        }
     }
 
     /// <summary>Force-rebuild the WEM name map, deleting any stale disk cache.</summary>

@@ -77,7 +77,7 @@ class UnpackerPanel(QWidget):
     psk_extracted = Signal(list)        # list[Path] of extracted PSK/PSKX files
     log_message = Signal(str, str)      # message, level
     props_viewed = Signal(str, str)     # (title, json_text) for Text Viewer
-    audio_preview = Signal(str)         # local file path for Audio Preview tab
+    media_preview = Signal(str)         # local file path for Media Preview tab (audio or video — auto-routed by extension)
     tga_preview = Signal(str)           # local file path for TGA/image Preview tab
     mesh_preview = Signal(str)          # local .psk path for Mesh Preview tab
     version_mismatch = Signal(str)      # banner text for the log viewer
@@ -109,12 +109,15 @@ class UnpackerPanel(QWidget):
         self._wwise_audio_map: dict[str, list[dict]] = {}  # event_folder → [{debug_name, wem_vfs_path, ...}]
         self._wwise_scan_done = False
         self._pending_wwise_export: tuple[list[dict], str] | None = None  # (entries, output_dir)
-        self._audio_preview_temp_dir: "Path | None" = None   # set from main_window
+        # Single temp dir shared by audio + video previews — the MediaPreviewerPanel
+        # owns the parent and exposes per-kind subdirs so per-Clear rmtree only
+        # nukes one half. Set from main_window.
+        self._media_preview_temp_dir: "Path | None" = None
         self._mesh_preview_temp_dir: "Path | None" = None    # set from main_window
         self._tga_preview_temp_dir: "Path | None" = None     # set from main_window
-        # Pending temp-export-for-preview state. Tuple is (expected_path, kind)
-        # where kind ∈ {"audio", "mesh", "texture"} so _on_export_done can
-        # dispatch to the right preview signal once the file lands on disk.
+        # Pending temp-export-for-preview state. Tuple is (expected_path, kind, vfs_path)
+        # where kind ∈ {"audio", "mesh", "texture", "video"} so _on_export_done
+        # can dispatch to the right preview signal once the file lands on disk.
         self._pending_temp_preview: "tuple[str, str, str] | None" = None
 
         # Type cache populated by `scan_types` after mount. None means the cache
@@ -157,6 +160,7 @@ class UnpackerPanel(QWidget):
         type_cache_mod.CATEGORY_MESH:      "#4a9eff",
         type_cache_mod.CATEGORY_TEXTURE:   "#4dca7a",
         type_cache_mod.CATEGORY_AUDIO:     "#f0a040",
+        type_cache_mod.CATEGORY_VIDEO:     "#ff7777",
         type_cache_mod.CATEGORY_MATERIAL:  "#b87fff",
         type_cache_mod.CATEGORY_ANIMATION: "#40d0d0",
         type_cache_mod.CATEGORY_OTHER:     "#888888",
@@ -431,6 +435,7 @@ class UnpackerPanel(QWidget):
             (type_cache_mod.CATEGORY_MESH, "Meshes"),
             (type_cache_mod.CATEGORY_TEXTURE, "Textures"),
             (type_cache_mod.CATEGORY_AUDIO, "Audio"),
+            (type_cache_mod.CATEGORY_VIDEO, "Video"),
             (type_cache_mod.CATEGORY_MATERIAL, "Materials"),
             (type_cache_mod.CATEGORY_ANIMATION, "Animations"),
             (type_cache_mod.CATEGORY_OTHER, "Other"),
@@ -1144,17 +1149,18 @@ class UnpackerPanel(QWidget):
     _IMAGE_EXTS = frozenset({".tga", ".png", ".dds", ".bmp", ".jpg", ".jpeg"})
     _AUDIO_EXTS = frozenset({".wav", ".ogg", ".wem", ".bnk", ".ewem"})
     _MESH_EXTS = frozenset({".psk", ".pskx"})
+    _VIDEO_EXTS = frozenset({".bk2", ".mp4", ".webm", ".mov"})
     _PACKAGE_EXTS_FOR_MESH = (".uasset", ".upk", ".umap")
 
     def _classify_row(self, item: QTreeWidgetItem) -> str:
         """Identify what kind of preview a tree row supports.
 
-        Returns one of "mesh", "texture", "audio", "package", "unknown".
+        Returns one of "mesh", "texture", "audio", "video", "package", "unknown".
         - audio_data set            → "audio" (WWise virtual entry)
-        - export_type set           → mapped to mesh/texture/audio or "unknown"
-        - file with mesh/audio/img extension → that type
+        - export_type set           → mapped to mesh/texture/audio/video or "unknown"
+        - file with mesh/audio/img/video extension → that type
         - .uasset/.upk/.umap that hasn't been expanded yet → "package"
-          (the user can preview as mesh/texture/audio without expanding;
+          (the user can preview as mesh/texture/audio/video without expanding;
           the CLI runs a single-format export and we surface what landed)
         - everything else           → "unknown"
 
@@ -1172,6 +1178,8 @@ class UnpackerPanel(QWidget):
                 return "texture"
             if export_type in type_cache_mod.AUDIO_EXPORT_TYPES:
                 return "audio"
+            if export_type in type_cache_mod.VIDEO_EXPORT_TYPES:
+                return "video"
             return "unknown"
 
         vfs_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
@@ -1182,6 +1190,8 @@ class UnpackerPanel(QWidget):
             return "texture"
         if suffix in self._MESH_EXTS:
             return "mesh"
+        if suffix in self._VIDEO_EXTS:
+            return "video"
         if suffix in self._PACKAGE_EXTS_FOR_MESH:
             return "package"
         return "unknown"
@@ -1230,18 +1240,25 @@ class UnpackerPanel(QWidget):
                 act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_audio_vfs(p))
             menu.addAction(act)
 
+        def _add_video():
+            act = QAction("Preview Video", self)
+            act.triggered.connect(lambda checked=False, p=vfs_path: self._preview_video_vfs(p))
+            menu.addAction(act)
+
         if kind == "mesh":
             _add_mesh()
         elif kind == "texture":
             _add_texture()
         elif kind == "audio":
             _add_audio()
+        elif kind == "video":
+            _add_video()
         elif kind == "package":
             # If the package has been expanded, its children carry export_type
             # data. Show only the preview buttons matching what's actually
             # inside. If unexpanded (only the placeholder child exists), the
             # type cache may still know what's in the package — consult it
-            # before falling back to offering all three.
+            # before falling back to offering all four.
             is_unexpanded = (
                 item.childCount() == 0
                 or (
@@ -1258,6 +1275,7 @@ class UnpackerPanel(QWidget):
                     _add_mesh()
                     _add_texture()
                     _add_audio()
+                    _add_video()
                 else:
                     if type_cache_mod.CATEGORY_MESH in cached_cats:
                         _add_mesh()
@@ -1265,6 +1283,8 @@ class UnpackerPanel(QWidget):
                         _add_texture()
                     if type_cache_mod.CATEGORY_AUDIO in cached_cats:
                         _add_audio()
+                    if type_cache_mod.CATEGORY_VIDEO in cached_cats:
+                        _add_video()
             else:
                 child_kinds = {
                     self._classify_row(item.child(i))
@@ -1276,6 +1296,8 @@ class UnpackerPanel(QWidget):
                     _add_texture()
                 if "audio" in child_kinds:
                     _add_audio()
+                if "video" in child_kinds:
+                    _add_video()
 
         # Properties always available — the CLI's get_props returns inline
         # JSON regardless of asset type, so this never has to disable.
@@ -1357,8 +1379,13 @@ class UnpackerPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _temp_dir_for_kind(self, kind: str) -> "Path | None":
+        # Audio + video share the MediaPreviewerPanel's temp dir but live in
+        # per-kind subdirs so the panel's per-list Clear button can rmtree
+        # one half without nuking the other.
         if kind == "audio":
-            return self._audio_preview_temp_dir
+            return self._media_preview_temp_dir / "audio" if self._media_preview_temp_dir else None
+        if kind == "video":
+            return self._media_preview_temp_dir / "video" if self._media_preview_temp_dir else None
         if kind == "mesh":
             return self._mesh_preview_temp_dir
         if kind == "texture":
@@ -1375,6 +1402,10 @@ class UnpackerPanel(QWidget):
         if kind == "texture":
             tex_format = config.get("export_texture_format") or "png"
             return (f".{tex_format}", ".png", ".tga", ".dds")
+        if kind == "video":
+            # CLI preserves the source extension byte-for-byte for both
+            # FileMediaSource and raw_video paths — matches RAW_VIDEO_EXTENSIONS.
+            return (".mp4", ".webm", ".mov", ".bk2")
         return ()
 
     def _find_in_temp(self, temp_dir: Path, vfs_path: str, kind: str) -> "Path | None":
@@ -1419,7 +1450,7 @@ class UnpackerPanel(QWidget):
             return
 
         formats = {"mesh": False, "texture": False, "props": False,
-                   "animation": False, "audio": False}
+                   "animation": False, "audio": False, "video": False}
         formats[kind] = True
 
         expected = self._predict_temp_output(Path(temp_dir), vfs_path, kind)
@@ -1438,14 +1469,67 @@ class UnpackerPanel(QWidget):
         """Preview a VFS audio file — use local export if available, else temp-export."""
         local = self._find_local_file(vfs_path)
         if local:
-            self.audio_preview.emit(str(local))
+            self.media_preview.emit(str(local))
             return
-        if self._audio_preview_temp_dir:
-            cached = self._find_in_temp(self._audio_preview_temp_dir, vfs_path, "audio")
+        audio_temp = self._temp_dir_for_kind("audio")
+        if audio_temp:
+            cached = self._find_in_temp(audio_temp, vfs_path, "audio")
             if cached:
-                self.audio_preview.emit(str(cached))
+                self.media_preview.emit(str(cached))
                 return
         self._kick_temp_export(vfs_path, "audio")
+
+    def _preview_video_vfs(self, vfs_path: str):
+        """Preview a VFS video file — local export if present, else temp-export.
+
+        Two paths share this entry: a raw video leaf (``.bk2/.mp4/.webm/.mov``
+        VFS path) goes through the CLI's ``export_video`` raw branch; a
+        FileMediaSource UObject is exported via the same command and the CLI
+        resolves the embedded ``FilePath`` reference internally.
+        """
+        local = self._find_local_file(vfs_path)
+        if local:
+            self.media_preview.emit(str(local))
+            return
+        video_temp = self._temp_dir_for_kind("video")
+        if video_temp:
+            cached = self._find_in_temp(video_temp, vfs_path, "video")
+            if cached:
+                self.media_preview.emit(str(cached))
+                return
+        self._kick_video_temp_export(vfs_path)
+
+    def _kick_video_temp_export(self, vfs_path: str) -> None:
+        """Send a video-only temp export via ``export_video`` and arm the dispatcher."""
+        if self._exporting:
+            self._status_label.setText("Export in progress — try again after it finishes")
+            return
+        if not self._mounted:
+            self._status_label.setText("Mount an archive first")
+            return
+        temp_dir = self._temp_dir_for_kind("video")
+        if temp_dir is None:
+            self._status_label.setText("Video preview temp dir not configured")
+            return
+
+        # Decide whether this is a raw leaf or a FileMediaSource UObject by
+        # extension — the CLI handler dispatches on the same `kind` field.
+        from core.unpacker import RAW_VIDEO_EXTENSIONS
+        suffix = Path(vfs_path.lower()).suffix
+        leaf_kind = "raw_video" if suffix in RAW_VIDEO_EXTENSIONS else "file_media_source"
+
+        # CLI writes to <temp_dir>/<basename> — predict the basename so the
+        # dispatcher can find the file even when `succeeded` echoes the VFS
+        # path rather than the disk output.
+        name = vfs_path.rsplit("/", 1)[-1] or vfs_path
+        expected = Path(temp_dir) / name
+        self._pending_temp_preview = (str(expected), "video", vfs_path)
+
+        self._status_label.setText(f"Exporting for preview: {name}")
+        self._begin_export()
+        self._unpacker.export_video(
+            [{"vfs_path": vfs_path, "kind": leaf_kind}], str(temp_dir),
+        )
 
     def _preview_mesh_vfs(self, vfs_path: str):
         """Preview a VFS mesh — local export if present, else temp-export."""
@@ -1515,6 +1599,11 @@ class UnpackerPanel(QWidget):
             self._preview_audio_vfs(vfs_path)
             return
 
+        # Raw video leaves → video preview
+        if suffix in self._VIDEO_EXTS:
+            self._preview_video_vfs(vfs_path)
+            return
+
         if self._exporting:
             self._status_label.setText("Export in progress \u2014 props will load when complete")
             return
@@ -1577,7 +1666,7 @@ class UnpackerPanel(QWidget):
         return None
 
     def _try_audio_preview(self, audio_data: dict):
-        """Resolve a virtual WWise audio entry to a local file and emit audio_preview."""
+        """Resolve a virtual WWise audio entry to a local file and emit media_preview."""
         audio_format = config.get("export_audio_format") or "wav"
         evt_folder = audio_data.get("event_folder", "")
         full_folder = (
@@ -1590,14 +1679,15 @@ class UnpackerPanel(QWidget):
         if self._export_output_dir:
             local_path = Path(self._export_output_dir) / full_folder / f"{audio_data['debug_name']}.{audio_format}"
             if local_path.is_file():
-                self.audio_preview.emit(str(local_path))
+                self.media_preview.emit(str(local_path))
                 return
 
         # Check temp dir
-        if self._audio_preview_temp_dir:
-            temp_path = self._audio_preview_temp_dir / full_folder / f"{audio_data['debug_name']}.{audio_format}"
+        audio_temp = self._temp_dir_for_kind("audio")
+        if audio_temp:
+            temp_path = audio_temp / full_folder / f"{audio_data['debug_name']}.{audio_format}"
             if temp_path.is_file():
-                self.audio_preview.emit(str(temp_path))
+                self.media_preview.emit(str(temp_path))
                 return
 
         # Export to temp dir for preview
@@ -1607,17 +1697,17 @@ class UnpackerPanel(QWidget):
         if not self._mounted:
             self._status_label.setText("Mount an archive first")
             return
-        if not self._audio_preview_temp_dir:
+        if not audio_temp:
             self._status_label.setText("Audio not exported yet \u2014 export it first to preview")
             return
 
-        temp_dir = str(self._audio_preview_temp_dir)
+        temp_dir = str(audio_temp)
         entry = {
             "wem_vfs_path": audio_data["wem_vfs_path"],
             "target_name": audio_data["debug_name"],
             "target_folder": full_folder,
         }
-        expected = self._audio_preview_temp_dir / full_folder / f"{audio_data['debug_name']}.{audio_format}"
+        expected = audio_temp / full_folder / f"{audio_data['debug_name']}.{audio_format}"
         self._pending_temp_preview = (str(expected), "audio", audio_data["wem_vfs_path"])
 
         self._status_label.setText(f"Exporting for preview: {audio_data['debug_name']}")
@@ -1884,7 +1974,8 @@ class UnpackerPanel(QWidget):
             self._cancel_btn.setEnabled(False)
 
             signal_for_kind = {
-                "audio": self.audio_preview,
+                "audio": self.media_preview,
+                "video": self.media_preview,
                 "mesh": self.mesh_preview,
                 "texture": self.tga_preview,
             }.get(kind)
