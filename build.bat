@@ -57,7 +57,9 @@ if %ERRORLEVEL% neq 0 (
     echo      Installing test dependencies...
     py -m pip install -r requirements-dev.txt
 )
-py -m pytest -q -m "not slow and not requires_blender and not requires_everything and not requires_dotnet_cli" --maxfail=1
+:: Drop -q so CI logs name the failing test instead of printing a wall of
+:: dots followed by "ERROR: Pre-build tests failed."
+py -m pytest -m "not slow and not requires_blender and not requires_everything and not requires_dotnet_cli" --maxfail=1 --tb=short -rfE
 if %ERRORLEVEL% neq 0 (
     echo.
     echo ERROR: Pre-build tests failed. Aborting build.

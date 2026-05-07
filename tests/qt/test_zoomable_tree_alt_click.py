@@ -70,7 +70,7 @@ def test_alt_click_on_collapsed_folder_expands_recursively(qtbot):
     # Qt is configured in conftest, so showing is harmless and load-bearing
     # for hit-testing the item position.
     tree.show()  # required so visualItemRect returns a non-null rect for hit-testing
-    qtbot.waitExposed(tree)
+    qtbot.wait(0)  # flush pending events without relying on a WM expose event
 
     _click(tree, root, Qt.KeyboardModifier.AltModifier)
 
@@ -83,7 +83,7 @@ def test_alt_click_on_expanded_folder_collapses_recursively(qtbot):
     root, mid, leaf = _build_three_levels(tree)
     tree.expand_recursive(root)
     tree.show()  # required so visualItemRect can hit-test the item
-    qtbot.waitExposed(tree)
+    qtbot.wait(0)
 
     _click(tree, root, Qt.KeyboardModifier.AltModifier)
 
@@ -95,7 +95,7 @@ def test_alt_click_on_leaf_is_noop(qtbot):
     tree = _make_tree(qtbot)
     leaf = QTreeWidgetItem(tree, ["only-leaf"])
     tree.show()  # required so visualItemRect can hit-test the item
-    qtbot.waitExposed(tree)
+    qtbot.wait(0)
 
     _click(tree, leaf, Qt.KeyboardModifier.AltModifier)
 
@@ -113,7 +113,7 @@ def test_shift_alt_click_does_not_recurse_expand(qtbot):
         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         it.setCheckState(0, Qt.CheckState.Unchecked)
     tree.show()  # required so visualItemRect can hit-test the items
-    qtbot.waitExposed(tree)
+    qtbot.wait(0)
 
     # Prime the last-clicked-item with a regular click on 'a'.
     _click(tree, a, Qt.KeyboardModifier.NoModifier)

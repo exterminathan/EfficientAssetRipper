@@ -20,8 +20,11 @@ def main_window(qtbot, mock_qsettings, tmp_profiles_dir):
     # reflect the *layout* state rather than the unrendered "no parent shown"
     # state. The Qt platform is forced to "offscreen" in tests/qt/conftest.py
     # so this never produces a visible window.
+    # show() required so QDockWidget visibility / toggleViewAction.isChecked()
+    # reflect the *layout* state rather than the unrendered "no parent shown"
+    # state. Offscreen QPA platform makes this invisible.
     win.show()
-    qtbot.waitExposed(win)
+    qtbot.wait(0)  # let pending Qt events flush so dock state stabilises
     return win
 
 
@@ -33,7 +36,7 @@ def test_first_run_falls_back_to_default_layout(qtbot, mock_qsettings, tmp_profi
     win = MainWindow()
     qtbot.addWidget(win)
     win.show()  # required so dock visibility / toggleViewAction.isChecked() are realised
-    qtbot.waitExposed(win)
+    qtbot.wait(0)
 
     for dock in win._docks.values():
         assert dock.toggleViewAction().isChecked() is True, (
