@@ -285,6 +285,27 @@ class EverythingSDK:
         return self.search_file(texture_name, extension="tga", folder=folder)
 
     # ------------------------------------------------------------------
+    def find_textures_in_folder(
+        self,
+        folder: str,
+        ext: str = "tga",
+        max_results: int = 5_000,
+    ) -> list[Path]:
+        """List every texture under *folder*, scoped to *ext*.
+
+        Used by the keyword auto-detect fallback to enumerate candidate
+        textures near a mesh when suffix matching produced nothing. Folder
+        scoping is recursive-substring like every other Everything query in
+        this module.
+        """
+        if not folder:
+            return []
+        ext = ext.lstrip(".")
+        query = f'path:"{_normalize_folder(folder)}" ext:{ext}'
+        raw = self.search(query, max_results=max_results)
+        return [Path(p) for p in raw]
+
+    # ------------------------------------------------------------------
     def find_props_file(
         self, name: str, folder: str = "", max_results: int = 10_000
     ) -> list[Path]:

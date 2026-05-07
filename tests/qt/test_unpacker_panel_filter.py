@@ -32,11 +32,14 @@ def _make_placeholder_folder(parent, vfs_path: str, name: str) -> QTreeWidgetIte
     return item
 
 
-def _make_file(parent, vfs_path: str, name: str | None = None) -> QTreeWidgetItem:
+def _make_file(parent, vfs_path: str, name: str | None = None,
+               asset_type: str | None = None) -> QTreeWidgetItem:
     display = name or vfs_path.rsplit("/", 1)[-1]
     item = QTreeWidgetItem(parent, [display])
     item.setData(0, Qt.ItemDataRole.UserRole, vfs_path)
     item.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+    if asset_type is not None:
+        item.setData(0, Qt.ItemDataRole.UserRole + 5, asset_type)
     return item
 
 
@@ -102,8 +105,38 @@ def test_row_categories_unscanned_package_during_scan_is_other(qtbot):
     p._type_cache = TypeCache()  # empty
     p._type_scan_in_progress = True
     item = _make_file(p._tree, "/Game/Anything.uasset")
-    # Uncached packages default to Other so category filters stay meaningful.
+    # Uncached packages with no asset_type stamped default to Other so
+    # category filters stay meaningful.
     assert p._row_categories(item) == {tc.CATEGORY_OTHER}
+
+
+def test_row_categories_uses_browse_asset_type_when_cache_unscanned(qtbot):
+    """During the type scan, a row's CLI-stamped asset_type is the same-quality
+    fallback the cache will eventually produce — use it instead of OTHER."""
+    p = _new_panel(qtbot)
+    p._type_cache = TypeCache()  # empty
+    p._type_scan_in_progress = True
+    item = _make_file(p._tree, "/Game/SK_Hero.uasset", asset_type="SkeletalMesh")
+    assert p._row_categories(item) == {tc.CATEGORY_MESH}
+
+
+def test_row_categories_browse_asset_type_recognizes_wwise_wrapper(qtbot):
+    p = _new_panel(qtbot)
+    p._type_cache = TypeCache()
+    item = _make_file(p._tree, "/Game/WwiseAudio/Event/Foo.uasset",
+                      asset_type="AkAudioEvent")
+    assert p._row_categories(item) == {tc.CATEGORY_AUDIO}
+
+
+def test_row_categories_cache_takes_priority_over_asset_type(qtbot):
+    """If both are present, the cache wins — it's the canonical source after scan."""
+    p = _new_panel(qtbot)
+    p._type_cache = TypeCache()
+    p._type_cache.add_batch([
+        {"path": "/G/X.uasset", "exports": [{"name": "X", "export_type": "Texture2D"}]},
+    ])
+    item = _make_file(p._tree, "/G/X.uasset", asset_type="SkeletalMesh")
+    assert p._row_categories(item) == {tc.CATEGORY_TEXTURE}
 
 
 def test_row_categories_wwise_virtual_audio(qtbot):
@@ -326,3 +359,130 @@ def test_no_filter_active_shows_everything(qtbot):
     assert not folder.isHidden()
     assert not a.isHidden()
     assert not b.isHidden()
+
+
+# ---------------------------------------------------------------------------
+# Lazy-load expansion driven by the type cache
+# ---------------------------------------------------------------------------
+
+def _spy_browse(panel) -> list[str]:
+    """Replace panel._unpacker.browse with a capturing stub. Returns the call log."""
+    calls: list[str] = []
+    panel._unpacker.browse = calls.append  # type: ignore[assignment]
+    return calls
+
+
+def test_filter_browses_placeholder_ancestor_when_match_lives_below(qtbot):
+    """A name search whose match is inside a still-collapsed folder must
+    fire browse() on the placeholder ancestor so the next pass can descend."""
+    p = _new_panel(qtbot)
+    p._type_cache = TypeCache()
+    p._type_cache.add_batch([
+        {"path": "Obduction/Content/Materials/CM_Puppet_Theatre_Wood_A.uasset",
+         "exports": [{"name": "CM_Puppet_Theatre_Wood_A", "export_type": "Material"}]},
+    ])
+
+    # Only the top-level folder exists in the tree (lazy-loaded, placeholder-only).
+    _make_placeholder_folder(p._tree.invisibleRootItem(), "Obduction", "Obduction")
+    calls = _spy_browse(p)
+
+    p._search.setText("cm_puppet_theatre_wood_a")
+    p._filter_tree()
+
+    # The shallowest placeholder ancestor on the match path got browsed.
+    assert "Obduction" in calls
+    assert "Obduction" in p._pending_filter_browses
+
+
+def test_filter_does_not_browse_already_populated_folders(qtbot):
+    p = _new_panel(qtbot)
+    p._type_cache = TypeCache()
+    p._type_cache.add_batch([
+        {"path": "G/Foo/Bar.uasset",
+         "exports": [{"name": "Bar", "export_type": "Material"}]},
+    ])
+
+    g = _make_folder(p._tree.invisibleRootItem(), "G", "G")
+    # G is populated (no placeholder), Foo is the lazy frontier.
+    _make_placeholder_folder(g, "G/Foo", "Foo")
+    calls = _spy_browse(p)
+
+    p._search.setText("bar")
+    p._filter_tree()
+
+    # Should hit only the placeholder, not the already-populated G.
+    assert "G" not in calls
+    assert "Foo" in calls or "G/Foo" in calls
+
+
+def test_filter_skips_user_collapsed_folders(qtbot):
+    p = _new_panel(qtbot)
+    p._type_cache = TypeCache()
+    p._type_cache.add_batch([
+        {"path": "Game/A/B.uasset",
+         "exports": [{"name": "B", "export_type": "Material"}]},
+    ])
+
+    folder = _make_placeholder_folder(p._tree.invisibleRootItem(), "Game", "Game")
+    p._user_collapsed.add(folder)
+    calls = _spy_browse(p)
+
+    p._search.setText("b")
+    p._filter_tree()
+
+    assert "Game" not in calls
+
+
+def test_filter_does_not_repeat_pending_browse(qtbot):
+    p = _new_panel(qtbot)
+    p._type_cache = TypeCache()
+    p._type_cache.add_batch([
+        {"path": "X/Y/Z.uasset",
+         "exports": [{"name": "Z", "export_type": "Material"}]},
+    ])
+
+    _make_placeholder_folder(p._tree.invisibleRootItem(), "X", "X")
+    calls = _spy_browse(p)
+
+    p._search.setText("z")
+    p._filter_tree()
+    p._filter_tree()  # second pass while result is still in-flight
+
+    assert calls.count("X") == 1
+
+
+def test_browse_result_clears_pending_marker_for_that_path(qtbot):
+    p = _new_panel(qtbot)
+    p._pending_filter_browses.add("Some/Folder")
+    # Mock receiving a (matching) browse result — _on_browse_result discards the marker.
+    p._on_browse_result("Some/Folder", [])
+    assert "Some/Folder" not in p._pending_filter_browses
+
+
+def test_filter_clear_resets_pending_set(qtbot):
+    p = _new_panel(qtbot)
+    p._pending_filter_browses.add("X")
+    p._search.setText("")
+    p._filter_tree()
+    assert p._pending_filter_browses == set()
+
+
+def test_filter_per_pass_cap_limits_browse_calls(qtbot):
+    p = _new_panel(qtbot)
+    p._type_cache = TypeCache()
+    # 30 distinct top-level folders, each containing a matching package.
+    p._type_cache.add_batch([
+        {"path": f"Pak{i}/Foo/Bar.uasset",
+         "exports": [{"name": "Bar", "export_type": "Material"}]}
+        for i in range(30)
+    ])
+    for i in range(30):
+        _make_placeholder_folder(p._tree.invisibleRootItem(), f"Pak{i}", f"Pak{i}")
+    calls = _spy_browse(p)
+
+    p._search.setText("bar")
+    p._filter_tree()
+
+    # Cap caps at 25 per pass — leftover folders surface on subsequent passes
+    # as their existing pending entries are cleared by browse results.
+    assert len(calls) == 25

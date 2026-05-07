@@ -6,9 +6,12 @@ folder segments to assign a human-readable category and subcategory.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Category mapping — top-level folder → category
@@ -55,10 +58,62 @@ class AssetCategory:
     """Category + subcategory for an asset."""
     category: str       # e.g. "Characters"
     subcategory: str    # e.g. "B1Droid"  (second-level folder or "General")
+    reason: str = ""    # diagnostic — set when category is "Uncategorized"
 
     @property
     def display(self) -> str:
         return f"{self.category} / {self.subcategory}"
+
+
+# Common UE content roots — used as fallback markers when the configured
+# game_folder doesn't line up with the PSK path. Lowercased for matching.
+_UE_PATH_MARKERS = ("content", "game")
+
+
+def _relative_parts(psk_path: Path, game_folder: str) -> tuple[tuple[str, ...], str]:
+    """Compute path parts of *psk_path* relative to *game_folder*.
+
+    Returns ``(parts, reason)``. ``reason`` is empty on success, or a short
+    diagnostic string describing why the relative path could not be derived.
+    Walks three strategies before giving up:
+
+    1. ``Path.relative_to`` (case-sensitive, fastest path).
+    2. Case-insensitive parts-prefix walk — handles the Windows situation
+       where the configured ``game_folder`` and the on-disk PSK path differ
+       only in casing.
+    3. UE convention markers (``Content``/``Game``) — slice from the first
+       occurrence in the PSK path. Catches profiles that point at the wrong
+       sibling directory but still share a recognisable UE root.
+    """
+    try:
+        return psk_path.relative_to(game_folder).parts, ""
+    except ValueError:
+        pass
+
+    psk_parts = psk_path.parts
+    if not psk_parts:
+        return (), "empty_psk_path"
+
+    psk_lower = tuple(p.lower() for p in psk_parts)
+    gf_parts = Path(game_folder).parts if game_folder else ()
+    gf_lower = tuple(p.lower() for p in gf_parts)
+
+    if gf_lower and len(gf_lower) <= len(psk_lower):
+        # Look for the configured game_folder anywhere as a contiguous run of
+        # parts (case-insensitive). Picks the earliest match so the slice
+        # represents the most-of-the-tree under it.
+        for start in range(0, len(psk_lower) - len(gf_lower) + 1):
+            if psk_lower[start:start + len(gf_lower)] == gf_lower:
+                return psk_parts[start + len(gf_lower):], ""
+
+    # Marker fallback: if the user pointed game_folder somewhere odd but the
+    # PSK clearly sits under a UE Content/Game root, classify from there.
+    for marker in _UE_PATH_MARKERS:
+        for idx, part in enumerate(psk_lower):
+            if part == marker and idx + 1 < len(psk_parts):
+                return psk_parts[idx + 1:], ""
+
+    return (), "path_not_under_game_folder"
 
 
 def classify(psk_path: Path, game_folder: str) -> AssetCategory:
@@ -69,36 +124,51 @@ def classify(psk_path: Path, game_folder: str) -> AssetCategory:
         game_folder: The root game content folder path.
 
     Returns:
-        AssetCategory with category and subcategory strings.
+        AssetCategory with category and subcategory strings. When the path
+        cannot be located under the game folder, ``reason`` carries a short
+        diagnostic the GUI can show next to the category.
     """
-    try:
-        rel = psk_path.relative_to(game_folder)
-    except ValueError:
-        return AssetCategory("Uncategorized", "Unknown")
-
-    parts = rel.parts  # e.g. ("Game", "Characters", "B1Droid", "B1Droid.psk")
+    parts, reason = _relative_parts(psk_path, game_folder)
 
     if not parts:
-        return AssetCategory("Uncategorized", "Unknown")
+        log.warning(
+            "classify: %s could not be made relative to game_folder %r (%s)",
+            psk_path, game_folder, reason or "no_parts",
+        )
+        return AssetCategory("Uncategorized", "Unknown", reason=reason or "no_parts")
 
-    # Skip common container folders that aren't real categories
+    # Slide the window forward to the first segment AFTER the UE
+    # ``Content``/``Game`` marker. This handles layouts where the unpacker
+    # preserves a game-name folder ahead of Content, e.g.
+    # ``Obduction/Content/Avatars/...`` — without this, "Obduction" and
+    # "Content" themselves would surface as top-level categories. We strip
+    # only once (the first marker found) so a hypothetical nested
+    # ``Content/Engine/Content/...`` doesn't lose mid-tree structure.
     _SKIP = {"game", "content"}
-    while len(parts) > 1 and parts[0].lower() in _SKIP:
-        parts = parts[1:]
+    for idx, part in enumerate(parts):
+        if part.lower() in _SKIP and idx + 1 < len(parts):
+            parts = parts[idx + 1:]
+            break
 
     top = parts[0].lower()
     category = _TOP_LEVEL_MAP.get(top)
 
     # If no direct map, check keyword overrides on the full relative path
     if category is None:
-        rel_str = str(rel)
+        rel_str = "/".join(parts)
         for pattern, cat in _KEYWORD_OVERRIDES:
             if pattern.search(rel_str):
                 category = cat
                 break
 
+    # Last resort: use the actual top-level folder name (preserving its
+    # on-disk casing) as the category. UE games organise Content/ however
+    # the studio wants — Obduction has Avatars/Skies/MergedMeshes/etc. that
+    # don't match any curated alias. Falling through to a single "Other"
+    # bucket made the picker useless on those titles. Better to mirror the
+    # real folder structure and let the user see what's there.
     if category is None:
-        category = "Other"
+        category = parts[0]
 
     # Subcategory = second-level folder if available, otherwise "General"
     subcategory = parts[1] if len(parts) > 2 else "General"

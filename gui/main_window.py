@@ -694,7 +694,9 @@ class MainWindow(QMainWindow):
             return
 
         presets = config.load_presets()
-        scanner = AssetScanner(game_folder, presets, sdk)
+        scanner = AssetScanner(
+            game_folder, presets, sdk, **self._texture_resolution_kwargs()
+        )
 
         # Seed scanner with any already-loaded cached entries so it skips them
         current_assets = self._browser.get_assets()
@@ -825,9 +827,32 @@ class MainWindow(QMainWindow):
         )
         self._process_queue()
 
+    def _running_workers(self) -> list[QThread]:
+        """Return active workers whose underlying Qt object is still alive.
+
+        ``QThread.isRunning`` raises ``RuntimeError`` when the C++ side has
+        been deleted but the Python wrapper is still pinned in
+        ``_active_workers`` (e.g. ``deleteLater`` fired before the
+        ``finished`` slot pruned the entry — possible if the worker's parent
+        chain processed a deferred-delete first). We treat any such entry as
+        "not running" and prune it from the list so callers don't trip over
+        it twice.
+        """
+        live: list[QThread] = []
+        dead_idx: list[int] = []
+        for idx, w in enumerate(self._active_workers):
+            try:
+                if w.isRunning():
+                    live.append(w)
+            except RuntimeError:
+                dead_idx.append(idx)
+        for idx in reversed(dead_idx):
+            del self._active_workers[idx]
+        return live
+
     def _is_busy(self) -> bool:
         """Return True if any background operation is running."""
-        if any(w.isRunning() for w in self._active_workers):
+        if self._running_workers():
             return True
         if self._unpacker_panel.is_exporting:
             return True
@@ -850,6 +875,28 @@ class MainWindow(QMainWindow):
             self._unpacker_panel.cancel_export()
         if self._job_manager and self._job_manager.isRunning():
             self._cancel_processing()
+
+    def _texture_resolution_kwargs(self) -> dict:
+        """Resolve the active profile's texture-resolution settings.
+
+        Returns kwargs to pass to ``AssetScanner(...)``: profile_overrides,
+        profile_preset, and fallback_enabled. Falls back to in-memory
+        defaults when no profile is loaded or the profile JSON can't be
+        read — the scanner's own defaults are equivalent so this never
+        breaks scan flow.
+        """
+        name = self._current_profile_name
+        if not name:
+            return {}
+        try:
+            data = self._profile_manager.load_profile(name)
+        except (FileNotFoundError, ProfileLoadError):
+            return {}
+        return {
+            "profile_overrides": data.get("material_overrides") or {},
+            "profile_preset": data.get("texture_preset") or "default_pbr",
+            "fallback_enabled": bool(data.get("auto_resolve_fallback", True)),
+        }
 
     def _save_current_profile(self):
         """Persist the current UI state into the active profile JSON.
@@ -1071,7 +1118,9 @@ class MainWindow(QMainWindow):
             return
 
         presets = config.load_presets()
-        scanner = AssetScanner(game_folder, presets, sdk)
+        scanner = AssetScanner(
+            game_folder, presets, sdk, **self._texture_resolution_kwargs()
+        )
 
         self._log.append(f"Resolving {len(paths)} picked PSK files...", "info")
         self._statusbar.showMessage(f"Resolving {len(paths)} picked files...")
@@ -1310,7 +1359,9 @@ class MainWindow(QMainWindow):
             return
 
         presets = config.load_presets()
-        scanner = AssetScanner(game_folder, presets, sdk)
+        scanner = AssetScanner(
+            game_folder, presets, sdk, **self._texture_resolution_kwargs()
+        )
 
         self._log.append(f"Re-scanning {len(entries)} incomplete entries...", "info")
         self._scan_btn.setEnabled(False)
@@ -1344,25 +1395,19 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_psks_extracted(self, psk_paths: list):
-        """Receive extracted PSK files from the Unpacker and add to queue."""
-        from core.classifier import classify
+        """Receive extracted PSK files from the Unpacker and add to queue.
 
-        game_folder = config.get("game_folder") or config.get("unpack_output_dir") or ""
-        entries = []
-        for p in psk_paths:
-            e = AssetEntry(psk_path=p, name=p.stem)
-            if game_folder:
-                cat = classify(p, game_folder)
-                e.category = cat.category
-                e.subcategory = cat.subcategory
-            entries.append(e)
-
-        self._queue.add_to_queue(entries)
-        self._merge_entries_into_browser(entries)
-        msg = f"Added {len(entries)} extracted PSK files to queue"
-        self._log.append(msg, "info")
-        self._statusbar.showMessage(msg)
-        self._right_tabs.setCurrentIndex(0)
+        Routed through ``_add_picker_to_queue`` so each PSK gets fully
+        resolved (mesh props → material refs → texture lookup) before it
+        lands in the queue. Skipping the resolve step here previously
+        produced phantom entries with empty ``materials`` — they would
+        process but every Blender material warned ``No texture spec for
+        material: X (available: [])`` because ``to_manifest`` saw nothing
+        to wire.
+        """
+        if not psk_paths:
+            return
+        self._add_picker_to_queue(psk_paths)
 
     def closeEvent(self, event):
         """Save profile and stop the CLI process on exit."""
@@ -1374,7 +1419,7 @@ class MainWindow(QMainWindow):
         except Exception:
             log.exception("save_current_profile during shutdown raised")
 
-        running_workers = [w for w in self._active_workers if w.isRunning()]
+        running_workers = self._running_workers()
         job_running = bool(self._job_manager and self._job_manager.isRunning())
         export_running = bool(self._unpacker_panel.is_exporting)
 

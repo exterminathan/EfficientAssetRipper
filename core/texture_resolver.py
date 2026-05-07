@@ -7,12 +7,46 @@ mapping each slot to an absolute file path + colorspace.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from core.everything import EverythingSDK
+
+log = logging.getLogger(__name__)
+
+
+# Cache of compiled `regex_suffixes` patterns. Keyed by the raw user pattern
+# string; value is the compiled re.Pattern, or None if compilation failed (so
+# we don't re-warn on every call). Patterns are wrapped as ``(?:USER)\Z`` at
+# compile time so a top-level alternation gets anchored cleanly.
+_REGEX_SUFFIX_CACHE: dict[str, Optional[re.Pattern[str]]] = {}
+
+
+def _compile_regex_suffix(pattern: str) -> Optional[re.Pattern[str]]:
+    """Return a cached compiled pattern for *pattern*, or None on bad regex.
+
+    The first failure is logged at WARNING; subsequent calls return None
+    silently. Patterns are wrapped as ``(?:<pattern>)\\Z`` so that a top-level
+    ``|`` alternation gets the end-anchor applied to every branch and not just
+    the last one. Compiled with ``re.IGNORECASE`` so authors can write either
+    case in their patterns regardless of how the texture name is normalised.
+    """
+    if pattern in _REGEX_SUFFIX_CACHE:
+        return _REGEX_SUFFIX_CACHE[pattern]
+    try:
+        compiled = re.compile(f"(?:{pattern})\\Z", re.IGNORECASE)
+    except re.error as e:
+        log.warning(
+            "Skipping invalid regex_suffix %r: %s", pattern, e,
+        )
+        _REGEX_SUFFIX_CACHE[pattern] = None
+        return None
+    _REGEX_SUFFIX_CACHE[pattern] = compiled
+    return compiled
 
 
 @dataclass
@@ -38,6 +72,11 @@ class TextureResolution:
     resolved: list[ResolvedTexture]
     unresolved: list[UnresolvedTexture]
     preset_used: str
+    keyword_fallback_used: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.keyword_fallback_used is None:
+            self.keyword_fallback_used = []
 
 
 def _pick_closest_path(candidates: list[Path], reference: Path) -> Path:
@@ -109,9 +148,14 @@ def classify_texture(
             ordered_slots.append(s)
     slot_priority = {name: idx for idx, name in enumerate(ordered_slots)}
 
-    # Pass 1: longest matching suffix wins; tiebreak by priority_order
+    # Pass 1: longest matching suffix wins; tiebreak by priority_order.
+    # Both literal and regex suffixes feed the same `best` tuple so a longer
+    # regex match in slot X correctly beats a shorter literal match in slot Y.
     best: Optional[tuple[int, int, str, dict]] = None
     for slot_name, slot_cfg in texture_slots.items():
+        prio = slot_priority.get(slot_name, 1 << 30)
+
+        # Literal suffixes — longest first within the slot.
         suffixes = sorted(
             slot_cfg.get("suffixes", []), key=lambda s: -len(s)
         )
@@ -119,12 +163,24 @@ def classify_texture(
             if not suffix:
                 continue
             if name_upper.endswith(suffix.upper()):
-                # Sort key: longer suffix preferred (negative len),
-                # lower priority index preferred.
-                key = (-len(suffix), slot_priority.get(slot_name, 1 << 30))
+                key = (-len(suffix), prio)
                 if best is None or key < (best[0], best[1]):
                     best = (key[0], key[1], slot_name, slot_cfg)
-                break  # only the longest suffix in this slot matters
+                break  # only the longest literal suffix in this slot matters
+
+        # Regex suffixes — every pattern is tried; the longest match in this
+        # slot competes against `best` from the literal pass.
+        for pattern in slot_cfg.get("regex_suffixes", []) or []:
+            compiled = _compile_regex_suffix(pattern)
+            if compiled is None:
+                continue
+            m = compiled.search(name_upper)
+            if m is None:
+                continue
+            matched_len = m.end() - m.start()
+            key = (-matched_len, prio)
+            if best is None or key < (best[0], best[1]):
+                best = (key[0], key[1], slot_name, slot_cfg)
     if best is not None:
         return best[2], best[3]
 
@@ -267,7 +323,177 @@ def resolve_textures(
         ))
         filled_slots.add(slot_name)
 
-    return TextureResolution(resolved, unresolved, preset_name)
+    keyword_fallback_used: list[str] = []
+    fallback_enabled = bool(
+        presets_data.get("_auto_resolve_fallback", True)
+        and preset.get("enable_keyword_fallback", True)
+    )
+    if fallback_enabled and reference_path is not None:
+        _apply_keyword_fallback(
+            resolved=resolved,
+            unresolved=unresolved,
+            filled_slots=filled_slots,
+            texture_slots=texture_slots,
+            sdk=sdk,
+            reference_path=reference_path,
+            keyword_fallback_used=keyword_fallback_used,
+        )
+
+    return TextureResolution(
+        resolved, unresolved, preset_name, keyword_fallback_used
+    )
+
+
+# Ordered keyword lists per slot — longest/most-specific first so that
+# ``basecolor`` always beats a shorter ``color`` match. The fallback only
+# fires when suffix and param_name classification both produced nothing.
+_KEYWORD_RULES: list[tuple[str, list[str]]] = [
+    ("base_color", ["basecolor", "base_color", "albedo", "diffuse", "_d_", "color"]),
+    ("normal", ["normal", "_nrm", "_nor_", "_n_"]),
+    ("roughness", ["roughness", "rough", "_r_"]),
+    ("metallic", ["metallic", "metal", "_m_", "met"]),
+    ("ao", ["ambientocclusion", "occlusion", "_ao", "ambient"]),
+    ("specular", ["specular", "spec", "_s_"]),
+    ("emissive", ["emissive", "emission", "glow", "_e_"]),
+    ("alpha", ["opacity", "alpha", "transparency"]),
+    ("height", ["height", "displacement", "disp"]),
+]
+
+
+def _keyword_classify(stem_lower: str) -> Optional[tuple[str, str, int]]:
+    """Score *stem_lower* against ``_KEYWORD_RULES``.
+
+    Returns ``(slot_name, matched_keyword, position)`` for the best match, or
+    ``None`` if nothing matched. Position is the index in *stem_lower* where
+    the keyword appears (later wins on tie — UE conventions put
+    role-suffixes near the end of the filename).
+    """
+    best: Optional[tuple[int, int, str, str]] = None  # (-len, -position, slot, kw)
+    for slot, keywords in _KEYWORD_RULES:
+        for kw in keywords:
+            idx = stem_lower.find(kw)
+            if idx == -1:
+                continue
+            # Prefer longer keyword, then later position in the stem.
+            key = (-len(kw), -idx)
+            if best is None or key < (best[0], best[1]):
+                best = (-len(kw), -idx, slot, kw)
+            break  # only the first/longest hit per slot matters
+    if best is None:
+        return None
+    return best[2], best[3], -best[1]
+
+
+def _scan_folder_for_psk(reference_path: Path) -> Optional[str]:
+    """Pick a folder to scan for textures, given the source PSK's path.
+
+    Walks up to 4 levels and stops at the first ancestor that *is* or
+    *contains* a ``Textures``/``Materials`` directory — UE projects
+    typically keep textures one or two folders away from the mesh, often as
+    a sibling. The returned folder is intended to be passed to a recursive
+    ``find_textures_in_folder`` query, so siblings under the chosen
+    ancestor are reachable. Falls back to the PSK's own parent for flat
+    layouts.
+    """
+    if not reference_path or not reference_path.parts:
+        return None
+
+    siblings_of_interest = {"textures", "materials"}
+    parent = reference_path.parent
+    cur = parent
+    for _ in range(4):
+        if cur.name.lower() in siblings_of_interest:
+            return str(cur)
+        try:
+            children = {p.name.lower() for p in cur.iterdir() if p.is_dir()}
+        except (OSError, PermissionError):
+            children = set()
+        if children & siblings_of_interest:
+            return str(cur)
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return str(parent)
+
+
+def _apply_keyword_fallback(
+    resolved: list[ResolvedTexture],
+    unresolved: list[UnresolvedTexture],
+    filled_slots: set[str],
+    texture_slots: dict,
+    sdk: EverythingSDK,
+    reference_path: Optional[Path],
+    keyword_fallback_used: list[str],
+) -> None:
+    """Fill any still-empty slots by scanning textures near the reference PSK.
+
+    Mutates *resolved*, *filled_slots*, and *keyword_fallback_used* in place.
+    Confident suffix/param matches always win — the fallback only writes to
+    slots not already in *filled_slots*. Removes from *unresolved* any entry
+    whose name now points at a found-by-fallback texture.
+    """
+    if reference_path is None:
+        return
+
+    # Skip slots without keyword rules in our table — leaves room for new
+    # slot types to be added to texture_slots without surprising fallback
+    # behavior.
+    addressable = {slot for slot, _ in _KEYWORD_RULES} & set(texture_slots.keys())
+    empty = addressable - filled_slots
+    if not empty:
+        return
+
+    folder = _scan_folder_for_psk(reference_path)
+    if not folder:
+        return
+
+    finder = getattr(sdk, "find_textures_in_folder", None)
+    if finder is None:
+        # Older test stubs may lack the new method — degrade silently.
+        return
+    candidates: list[Path] = list(finder(folder))
+    if not candidates:
+        return
+
+    # Score every TGA in the folder.
+    scored: dict[str, list[tuple[int, int, Path, str]]] = {}
+    for path in candidates:
+        match = _keyword_classify(path.stem.lower())
+        if match is None:
+            continue
+        slot, kw, pos = match
+        if slot not in empty:
+            continue
+        scored.setdefault(slot, []).append((-len(kw), -pos, path, kw))
+
+    if not scored:
+        return
+
+    found_names: set[str] = set()
+    for slot, entries in scored.items():
+        entries.sort()  # smallest tuple first → longest keyword + latest position
+        # Tie-break further by closeness to the reference PSK.
+        top_score = (entries[0][0], entries[0][1])
+        tied = [p for s1, s2, p, _ in entries if (s1, s2) == top_score]
+        chosen = _pick_closest_path(tied, reference_path) if len(tied) > 1 else entries[0][2]
+        slot_cfg = texture_slots[slot]
+        resolved.append(ResolvedTexture(
+            slot=slot,
+            texture_name=chosen.stem,
+            path=chosen,
+            colorspace=slot_cfg.get("colorspace", "sRGB"),
+            wiring=slot_cfg.get("wiring", {}),
+        ))
+        filled_slots.add(slot)
+        keyword_fallback_used.append(slot)
+        found_names.add(chosen.stem.lower())
+
+    if found_names:
+        # Demote any unresolved entries whose name now matches a found texture.
+        unresolved[:] = [
+            u for u in unresolved
+            if u.texture_name.lower() not in found_names
+        ]
 
 
 def _classify_with_param_names(

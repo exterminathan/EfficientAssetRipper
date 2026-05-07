@@ -3,12 +3,14 @@
 
   "version": 1,
 
-  "ignore_textures": ["DefaultTexture"],
+  "ignore_textures": ["DefaultTexture", "xColorFlat-White"],
   "ignore_patterns": ["BlendFunc"],
 
   "presets": {
     "default_pbr": {
       "description": "Standard PBR with packed ORM/RMA maps. Handles most UE4/5 assets.",
+      "enable_keyword_fallback": true,
+      "_fallback_note": "When suffix and param_name matching produce empty slots, the resolver scans the source PSK's nearest Textures/Materials folder and tries to fill empty slots by name keywords (basecolor/diffuse/albedo/normal/etc). Set false to disable.",
       "priority_order": [
         "base_color",
         "alb",
@@ -43,6 +45,10 @@
             "_Albedo",
             "_Color"
           ],
+          "regex_suffixes": [
+            "[-_]DIFFR?(?:_[A-Z])?(?:_(?:\\d+|DIRT))?$"
+          ],
+          "_regex_note": "Obduction-style: _DIFF / _DIFFR with optional _<letter> variant and optional _<digits> or _DIRT overlay. Hyphen separator handles VintageMetal-DiffR.",
           "param_names": [
             "BaseColor",
             "Diffuse",
@@ -93,6 +99,10 @@
 
         "normal": {
           "suffixes": ["_N", "_Normal", "_Norm"],
+          "regex_suffixes": [
+            "[-_](?:NMRL|NRML|NRM)(?:_[A-Z])?(?:_(?:\\d+|DIRT))?$"
+          ],
+          "_regex_note": "Obduction-style: _NMRL / _NRML / _NRM with optional _<letter> variant and optional _<digits> or _DIRT overlay. Hyphen separator handles VintageMetal-NRM.",
           "param_names": ["Normal", "NormalMap", "NormalTexture"],
           "colorspace": "Non-Color",
           "wiring": {
@@ -123,6 +133,9 @@
 
         "alpha": {
           "suffixes": ["_A", "_Alpha", "_Opacity"],
+          "regex_suffixes": [
+            "_ALPHA(?:_[A-Z])?(?:_\\d+)?$"
+          ],
           "colorspace": "Non-Color",
           "wiring": {
             "type": "direct",
@@ -132,6 +145,10 @@
 
         "metallic": {
           "suffixes": ["_M", "_Metallic", "_Met", "_Metal"],
+          "regex_suffixes": [
+            "_METALLIC_MASK(?:_[A-Z])?(?:_\\d+)?$"
+          ],
+          "_regex_note": "Obduction packs Metallic_Mask_<letter>_<digits> as a metallic-only mask map.",
           "colorspace": "Non-Color",
           "wiring": {
             "type": "direct",
@@ -195,6 +212,9 @@
             "_RGB_Masks",
             "_MASK",
             "_Mask"
+          ],
+          "regex_suffixes": [
+            "_MASK(?:_[A-Z])?(?:_\\d+)?$"
           ],
           "param_names": ["RGBMask", "RGB Mask"],
           "colorspace": "Non-Color",

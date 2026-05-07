@@ -200,6 +200,63 @@ def test_resolve_textures_legacy_str_param_name_still_supported(presets):
 # Phase 1.1 (integration): priority_order from real preset shape
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Per-profile override merging via AssetScanner._build_effective_presets
+# ---------------------------------------------------------------------------
+
+def test_build_effective_presets_profile_overrides_replace_global(presets):
+    """Per-profile overrides take precedence over the global file."""
+    from core.asset_scanner import _build_effective_presets
+
+    profile_overrides = {
+        "MI_Override_Demo": {
+            "preset": "default_pbr",
+            "force_textures": {"normal": "PROFILE_NORMAL"},
+        },
+        "MI_NewMaterial": {
+            "preset": "default_pbr",
+            "force_textures": {"base_color": "PROFILE_BC"},
+        },
+    }
+    merged = _build_effective_presets(
+        presets,
+        profile_overrides=profile_overrides,
+        profile_preset="default_pbr",
+        fallback_enabled=True,
+    )
+    overrides = merged["material_overrides"]
+    # Profile entry replaces the global one for the same material name.
+    assert overrides["MI_Override_Demo"]["force_textures"] == {
+        "normal": "PROFILE_NORMAL"
+    }
+    # Profile-only material is added alongside the global ones.
+    assert "MI_NewMaterial" in overrides
+    # Resolver-side toggles are stamped in.
+    assert merged["_auto_resolve_fallback"] is True
+    assert merged["_default_preset"] == "default_pbr"
+    # Original presets dict is untouched.
+    assert presets["material_overrides"]["MI_Override_Demo"]["force_textures"] == {
+        "base_color": "ForcedBaseColor"
+    }
+
+
+def test_build_effective_presets_disabled_fallback_round_trips_to_resolver(presets):
+    """Disabling the toggle in profile suppresses fallback even with empty slots."""
+    from core.asset_scanner import _build_effective_presets
+
+    merged = _build_effective_presets(
+        presets, profile_overrides=None, profile_preset=None, fallback_enabled=False
+    )
+    sdk = FakeEverythingSDK(folder_textures={})
+    res = resolve_textures(
+        texture_names=["T_Garbage_NoSuffix"],
+        presets_data=merged,
+        sdk=sdk,
+        reference_path=Path(r"C:\Game\Mesh\X.psk"),
+    )
+    assert res.keyword_fallback_used == []
+
+
 def test_resolve_textures_uses_priority_order_for_cross_slot_ties():
     """priority_order from preset JSON should propagate into classification."""
     presets = {

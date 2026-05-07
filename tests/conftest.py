@@ -161,6 +161,7 @@ class FakeEverythingSDK:
         textures: Optional[dict[str, list[Path]]] = None,
         psk_files: Optional[list[Path]] = None,
         props_files: Optional[dict[str, list[Path]]] = None,
+        folder_textures: Optional[dict[str, list[Path]]] = None,
     ) -> None:
         # Lookups are case-insensitive on the key
         self._textures: dict[str, list[Path]] = {
@@ -169,6 +170,12 @@ class FakeEverythingSDK:
         self._psk_files: list[Path] = list(psk_files or [])
         self._props_files: dict[str, list[Path]] = {
             k.lower(): list(v) for k, v in (props_files or {}).items()
+        }
+        # folder_textures: map normalized folder path → list of TGA paths
+        # under it. Used by find_textures_in_folder for keyword fallback tests.
+        self._folder_textures: dict[str, list[Path]] = {
+            os.path.normcase(str(k)): list(v)
+            for k, v in (folder_textures or {}).items()
         }
         self.calls: list[tuple[str, tuple, dict]] = []
 
@@ -182,6 +189,25 @@ class FakeEverythingSDK:
     def find_texture(self, texture_name: str, folder: str = "") -> list[Path]:
         self._record("find_texture", texture_name, folder=folder)
         return list(self._textures.get(texture_name.lower(), []))
+
+    def find_textures_in_folder(
+        self, folder: str, ext: str = "tga", max_results: int = 5_000
+    ) -> list[Path]:
+        self._record(
+            "find_textures_in_folder", folder, ext=ext, max_results=max_results
+        )
+        if not folder:
+            return []
+        # Match seeded folder mappings recursive-substring style: any seeded
+        # key whose path is the same as or beneath *folder* contributes.
+        folder_norm = os.path.normcase(str(folder)).rstrip("\\/")
+        out: list[Path] = []
+        for key, paths in self._folder_textures.items():
+            if key == folder_norm or key.startswith(folder_norm + os.sep):
+                out.extend(paths)
+                if len(out) >= max_results:
+                    return out[:max_results]
+        return out
 
     def find_psk_files(self, folder: str = "") -> list[Path]:
         self._record("find_psk_files", folder=folder)
@@ -223,9 +249,13 @@ def make_fake_sdk():
         textures: Optional[dict[str, list[Path]]] = None,
         psk_files: Optional[list[Path]] = None,
         props_files: Optional[dict[str, list[Path]]] = None,
+        folder_textures: Optional[dict[str, list[Path]]] = None,
     ) -> FakeEverythingSDK:
         return FakeEverythingSDK(
-            textures=textures, psk_files=psk_files, props_files=props_files
+            textures=textures,
+            psk_files=psk_files,
+            props_files=props_files,
+            folder_textures=folder_textures,
         )
 
     return _factory

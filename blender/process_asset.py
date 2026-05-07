@@ -224,7 +224,17 @@ def main():
                     break
 
             if mat_spec is None:
-                status_msg("warning", message=f"No texture spec for material: {mat_name}")
+                # Surface the available manifest keys so name-mismatch
+                # diagnoses don't require trawling the full status log.
+                # Keep the listing bounded — large meshes can hit hundreds.
+                available = list(materials_spec.keys())[:8]
+                status_msg(
+                    "warning",
+                    message=(
+                        f"No texture spec for material: {mat_name}"
+                        f" (available: {available}{'…' if len(materials_spec) > 8 else ''})"
+                    ),
+                )
                 continue
 
             textures = mat_spec.get("textures", {})

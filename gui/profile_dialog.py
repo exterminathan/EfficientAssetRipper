@@ -457,7 +457,69 @@ class _ProfileEditor(QWidget):
 
         keys_section.set_content_layout(keys_layout)
         outer.addWidget(keys_section)
+
+        # ── Texture Resolution ────────────────────────────────────────
+        # Per-game preferences for material wiring: which preset is used by
+        # default, whether the keyword auto-detect fallback runs, and the
+        # number of per-material overrides currently saved.
+        tex_section = CollapsibleSection("Texture Resolution", start_expanded=False)
+        tex_form = QFormLayout()
+
+        self._texture_preset = QComboBox()
+        self._texture_preset.setToolTip(
+            "The preset used to wire materials for this game's assets.\n"
+            "default_pbr handles standard UE4/5 layouts; simple_diffuse and\n"
+            "nrm_packed are alternatives. Per-material overrides below win\n"
+            "regardless of this default."
+        )
+        # Populate from presets JSON; tolerate any failure here (config.load_presets
+        # already falls back to bundled defaults silently).
+        try:
+            import config as _cfg
+            preset_names = list(_cfg.load_presets().get("presets", {}).keys())
+        except Exception:
+            preset_names = ["default_pbr"]
+        self._texture_preset.addItems(preset_names or ["default_pbr"])
+        install_combo_click_to_popup(self._texture_preset)
+        self._texture_preset.currentTextChanged.connect(self._on_changed)
+        tex_form.addRow("Default preset:", self._texture_preset)
+
+        self._auto_resolve_chk = QCheckBox(
+            "Enable keyword auto-detect fallback"
+        )
+        self._auto_resolve_chk.setToolTip(
+            "When the chosen preset's suffix rules can't classify a texture,\n"
+            "scan the mesh's nearest Textures/Materials folder and try to fill\n"
+            "empty slots by name keywords (basecolor/diffuse/albedo/normal/etc).\n"
+            "Helps games whose texture filenames don't follow UE conventions."
+        )
+        self._auto_resolve_chk.toggled.connect(self._on_changed)
+        tex_form.addRow("", self._auto_resolve_chk)
+
+        overrides_row = QHBoxLayout()
+        self._overrides_label = QLabel("0 overrides defined")
+        overrides_row.addWidget(self._overrides_label)
+        overrides_row.addStretch()
+        self._edit_overrides_btn = QPushButton("Edit per-material overrides…")
+        self._edit_overrides_btn.setToolTip(
+            "Open the override editor to force specific textures into specific\n"
+            "slots for individual materials in this profile."
+        )
+        self._edit_overrides_btn.clicked.connect(self._on_edit_overrides_clicked)
+        overrides_row.addWidget(self._edit_overrides_btn)
+        # Wrap the row in a QWidget so QFormLayout accepts it as a single field.
+        overrides_widget = QWidget()
+        overrides_widget.setLayout(overrides_row)
+        tex_form.addRow("Per-material:", overrides_widget)
+
+        tex_section.set_content_layout(tex_form)
+        outer.addWidget(tex_section)
         outer.addStretch()
+
+        # In-memory cache of material_overrides for the active profile —
+        # the dialog never round-trips this through GUI widgets, only via
+        # the override editor sub-dialog.
+        self._material_overrides: dict = {}
 
         self._building = False
 
@@ -473,7 +535,8 @@ class _ProfileEditor(QWidget):
     def set_enabled_for_profile(self, enabled: bool):
         for w in (self._game_dir, self._mounted_dir, self._output_dir,
                   self._ue_combo, self._mappings, self._auto_save_chk,
-                  self._keys_table):
+                  self._keys_table, self._texture_preset,
+                  self._auto_resolve_chk, self._edit_overrides_btn):
             w.setEnabled(enabled)
 
     def clear(self):
@@ -502,6 +565,27 @@ class _ProfileEditor(QWidget):
                 self._keys_table.setItem(row, 0, QTableWidgetItem(k.get("label", "")))
                 self._keys_table.setItem(row, 1, QTableWidgetItem(k.get("guid", "")))
                 self._keys_table.setItem(row, 2, QTableWidgetItem(k.get("key", "")))
+
+            # Texture-resolution fields. Coerce the preset combo to the saved
+            # value, falling back to the default if the saved one is no longer
+            # available in the loaded presets JSON.
+            saved_preset = data.get("texture_preset", "default_pbr") or "default_pbr"
+            idx = self._texture_preset.findText(saved_preset)
+            if idx >= 0:
+                self._texture_preset.setCurrentIndex(idx)
+            else:
+                # The preset disappeared from the JSON since this profile was
+                # saved — fall back to default_pbr without overwriting the
+                # profile's stored value.
+                idx = self._texture_preset.findText("default_pbr")
+                if idx >= 0:
+                    self._texture_preset.setCurrentIndex(idx)
+            self._auto_resolve_chk.setChecked(
+                bool(data.get("auto_resolve_fallback", True))
+            )
+            mo = data.get("material_overrides") or {}
+            self._material_overrides = dict(mo) if isinstance(mo, dict) else {}
+            self._refresh_overrides_label()
         finally:
             self._building = False
 
@@ -522,7 +606,40 @@ class _ProfileEditor(QWidget):
             "mappings_path": self._mappings.text().strip(),
             "auto_save_paths": self._auto_save_chk.isChecked(),
             "aes_keys": keys,
+            "texture_preset": self._texture_preset.currentText().strip() or "default_pbr",
+            "auto_resolve_fallback": self._auto_resolve_chk.isChecked(),
+            "material_overrides": copy.deepcopy(self._material_overrides),
         }
+
+    def _refresh_overrides_label(self):
+        n = len(self._material_overrides)
+        self._overrides_label.setText(
+            "0 overrides defined" if n == 0 else f"{n} override{'s' if n != 1 else ''} defined"
+        )
+
+    def _on_edit_overrides_clicked(self):
+        """Open the per-material override editor against the in-memory dict.
+
+        The override editor mutates a copy and returns the updated dict so
+        the dialog's standard Apply/Cancel flow still controls persistence.
+        """
+        from gui.material_overrides_dialog import MaterialOverridesDialog
+
+        try:
+            import config as _cfg
+            presets_data = _cfg.load_presets()
+        except Exception:
+            presets_data = {"presets": {"default_pbr": {"texture_slots": {}}}}
+
+        dlg = MaterialOverridesDialog(
+            overrides=copy.deepcopy(self._material_overrides),
+            presets_data=presets_data,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._material_overrides = dlg.result_overrides()
+            self._refresh_overrides_label()
+            self._on_changed()
 
     def _add_key_row(self):
         row = self._keys_table.rowCount()

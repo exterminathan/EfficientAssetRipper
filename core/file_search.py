@@ -79,6 +79,39 @@ class WalkSearcher:
     def find_texture(self, texture_name: str, folder: str = "") -> list[Path]:
         return self.search_file(texture_name, extension="tga", folder=folder)
 
+    def find_textures_in_folder(
+        self,
+        folder: str,
+        ext: str = "tga",
+        max_results: int = 5_000,
+    ) -> list[Path]:
+        """List every texture file under *folder* (recursive substring match).
+
+        Mirrors :meth:`EverythingSDK.find_textures_in_folder`. Filters the
+        cached index by path-prefix instead of re-walking; this still walks
+        from scratch when called against a folder above the currently indexed
+        root.
+        """
+        if not folder:
+            return []
+        # Index against the indexed root (or this folder, whichever covers it).
+        target = os.path.abspath(folder)
+        if (
+            not self._indexed_folder
+            or not target.lower().startswith(self._indexed_folder.lower())
+        ):
+            self._ensure_indexed(folder)
+        ext_key = "." + ext.lstrip(".").lower()
+        target_lower = target.lower().rstrip("\\/")
+        out: list[Path] = []
+        for p in self._by_ext.get(ext_key, []):
+            sp = str(p).lower()
+            if sp.startswith(target_lower + os.sep) or sp.startswith(target_lower + "/"):
+                out.append(p)
+                if len(out) >= max_results:
+                    break
+        return out
+
     def find_props_file(
         self, name: str, folder: str = "", max_results: int = 10_000
     ) -> list[Path]:

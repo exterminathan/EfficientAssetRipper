@@ -121,6 +121,64 @@ def test_assets_property_returns_list(qtbot):
     assert b.assets == [e]
 
 
+def test_asset_detail_dialog_warns_when_uncategorized(qtbot):
+    """The classifier-failure surface in the detail dialog tells the user
+    the path is not under the configured Game Folder."""
+    from gui.asset_browser import AssetDetailDialog
+
+    asset = AssetEntry(
+        psk_path=Path(r"F:\Foo\Obduction\Content\Mesh\X.pskx"),
+        name="X",
+        category="Uncategorized",
+        subcategory="Unknown",
+        mesh_props_found=True,
+    )
+    dlg = AssetDetailDialog(asset)
+    qtbot.addWidget(dlg)
+
+    # Find the Category QLabel — it carries the warning text now.
+    from PySide6.QtWidgets import QLabel
+    labels = [c for c in dlg.findChildren(QLabel)]
+    cat_text = " ".join(lbl.text() for lbl in labels)
+    assert "Uncategorized" in cat_text
+    assert "not under" in cat_text.lower()
+
+
+def test_asset_detail_dialog_marks_keyword_fallback_textures(qtbot):
+    """Textures filled by keyword fallback should be visually flagged."""
+    from gui.asset_browser import AssetDetailDialog
+    from core.asset_scanner import MaterialEntry
+    from core.texture_resolver import ResolvedTexture
+
+    mat = MaterialEntry(
+        slot_name="Slot",
+        material_name="MI_Mat",
+        textures=[
+            ResolvedTexture(
+                slot="base_color",
+                texture_name="T_Guess",
+                path=Path(r"C:\Game\Textures\T_Guess.tga"),
+                colorspace="sRGB",
+                wiring={"type": "direct", "target_input": "Base Color"},
+            )
+        ],
+        keyword_fallback_used=["base_color"],
+    )
+    asset = AssetEntry(
+        psk_path=Path(r"C:\Game\Mesh\X.psk"),
+        name="X",
+        category="Other",
+        subcategory="General",
+        materials=[mat],
+        mesh_props_found=True,
+    )
+    dlg = AssetDetailDialog(asset)
+    qtbot.addWidget(dlg)
+    from PySide6.QtWidgets import QLabel
+    text = " ".join(lbl.text() for lbl in dlg.findChildren(QLabel))
+    assert "auto-detected" in text
+
+
 def test_get_selected_assets_returns_only_checked(qtbot):
     from PySide6.QtCore import Qt
 

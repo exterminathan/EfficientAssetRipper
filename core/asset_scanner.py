@@ -55,6 +55,7 @@ class MaterialEntry:
     color_tints: dict = field(default_factory=dict)
     scalar_params: dict = field(default_factory=dict)
     parent_name: str = ""
+    keyword_fallback_used: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -260,6 +261,34 @@ def _extract_psk_materials(psk_path: Path) -> tuple[list[str], bool]:
 # Scanner
 # ---------------------------------------------------------------------------
 
+def _build_effective_presets(
+    presets_data: dict,
+    profile_overrides: Optional[dict],
+    profile_preset: Optional[str],
+    fallback_enabled: bool,
+) -> dict:
+    """Return a merged copy of *presets_data* with profile overrides on top.
+
+    Per-material entries from *profile_overrides* completely replace any
+    matching entry in the global ``material_overrides`` dict (whole-entry
+    replace, not key-level merge — keeps the override-precedence rule
+    obvious to the user). Stores the resolved fallback toggle under
+    ``_auto_resolve_fallback`` so the resolver can read it without a
+    signature change. Sets ``_default_preset`` to the profile's chosen
+    preset so callers that don't explicitly pass ``preset_name`` still get
+    the profile-selected default.
+    """
+    merged = dict(presets_data)
+    global_overrides = dict(presets_data.get("material_overrides", {}))
+    if profile_overrides:
+        global_overrides.update(profile_overrides)
+    merged["material_overrides"] = global_overrides
+    merged["_auto_resolve_fallback"] = bool(fallback_enabled)
+    if profile_preset:
+        merged["_default_preset"] = profile_preset
+    return merged
+
+
 class AssetScanner:
     """Discovers and resolves all assets in a game folder."""
 
@@ -268,9 +297,15 @@ class AssetScanner:
         game_folder: str,
         presets_data: dict,
         sdk: Optional[EverythingSDK] = None,
+        profile_overrides: Optional[dict] = None,
+        profile_preset: Optional[str] = None,
+        fallback_enabled: bool = True,
     ):
         self.game_folder = game_folder
-        self.presets_data = presets_data
+        self.presets_data = _build_effective_presets(
+            presets_data, profile_overrides, profile_preset, fallback_enabled
+        )
+        self.profile_preset = profile_preset or "default_pbr"
         self.sdk = sdk or get_sdk()
         self._cache: list[AssetEntry] = []
         self._cancelled = False
@@ -483,6 +518,7 @@ class AssetScanner:
             texture_names=tex_names,
             presets_data=self.presets_data,
             sdk=self.sdk,
+            preset_name=self.profile_preset,
             material_name=mat_ref.material_name,
             reference_path=psk_path,
             game_folder=self.game_folder,
@@ -492,6 +528,7 @@ class AssetScanner:
         mat_entry.textures = resolution.resolved
         mat_entry.unresolved = resolution.unresolved
         mat_entry.preset_used = resolution.preset_used
+        mat_entry.keyword_fallback_used = list(resolution.keyword_fallback_used)
 
         # Store color tints and scalar params from material props
         if mat_props.color_tints:
@@ -571,6 +608,7 @@ class AssetScanner:
                     texture_names=tex_names,
                     presets_data=self.presets_data,
                     sdk=self.sdk,
+                    preset_name=self.profile_preset,
                     material_name=current_parent,
                     reference_path=psk_path,
                     game_folder=self.game_folder,
@@ -579,6 +617,7 @@ class AssetScanner:
                 mat_entry.textures = resolution.resolved
                 mat_entry.unresolved = resolution.unresolved
                 mat_entry.preset_used = resolution.preset_used
+                mat_entry.keyword_fallback_used = list(resolution.keyword_fallback_used)
 
                 # Merge color_tints: start with parent, overlay child values
                 merged_tints = dict(parent_props.color_tints)
@@ -702,6 +741,7 @@ def _asset_to_dict(entry: AssetEntry) -> dict:
             "color_tints": m.color_tints,
             "scalar_params": m.scalar_params,
             "parent_name": m.parent_name,
+            "keyword_fallback_used": list(m.keyword_fallback_used),
         })
     return {
         "psk_path": str(entry.psk_path),
@@ -749,6 +789,7 @@ def _dict_to_asset(d: dict) -> AssetEntry:
             color_tints=md.get("color_tints", {}),
             scalar_params=md.get("scalar_params", {}),
             parent_name=md.get("parent_name", ""),
+            keyword_fallback_used=list(md.get("keyword_fallback_used", [])),
         ))
 
     bp = d.get("blend_path")

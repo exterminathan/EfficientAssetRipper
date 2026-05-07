@@ -246,3 +246,66 @@ def test_auto_save_paths_coerces_truthy_int_to_bool(tmp_profiles_dir):
 
     loaded = pm.load_profile("Coerce")
     assert loaded["auto_save_paths"] is True
+
+
+# ---------------------------------------------------------------------------
+# Texture-resolution profile keys (texture_preset, material_overrides,
+# auto_resolve_fallback) — added in v0.9 for per-game material wiring control
+# ---------------------------------------------------------------------------
+
+def test_texture_resolution_keys_default_for_new_profile(tmp_profiles_dir):
+    """Brand-new profiles get sensible defaults for the new keys."""
+    pm = ProfileManager()
+    pm.create_profile("Fresh", {})
+    loaded = pm.load_profile("Fresh")
+    assert loaded["texture_preset"] == "default_pbr"
+    assert loaded["material_overrides"] == {}
+    assert loaded["auto_resolve_fallback"] is True
+
+
+def test_texture_resolution_keys_round_trip(tmp_profiles_dir):
+    """All three new keys must survive a save/load cycle intact."""
+    pm = ProfileManager()
+    pm.create_profile("Obduction", {
+        "texture_preset": "simple_diffuse",
+        "auto_resolve_fallback": False,
+        "material_overrides": {
+            "BatteryMetals_A": {
+                "preset": "default_pbr",
+                "force_textures": {"base_color": "T_BatteryMetals_Albedo"},
+            }
+        },
+    })
+    loaded = pm.load_profile("Obduction")
+    assert loaded["texture_preset"] == "simple_diffuse"
+    assert loaded["auto_resolve_fallback"] is False
+    assert loaded["material_overrides"]["BatteryMetals_A"]["force_textures"] == {
+        "base_color": "T_BatteryMetals_Albedo"
+    }
+
+
+def test_legacy_profile_missing_new_keys_loads_with_defaults(tmp_profiles_dir):
+    """Profiles created before v0.9 must keep loading without the new keys."""
+    pm = ProfileManager()
+    pm.create_profile("Legacy", {})
+    raw = json.loads((tmp_profiles_dir / "Legacy.json").read_text(encoding="utf-8"))
+    for k in ("texture_preset", "material_overrides", "auto_resolve_fallback"):
+        raw.pop(k, None)
+    (tmp_profiles_dir / "Legacy.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = pm.load_profile("Legacy")
+    assert loaded["texture_preset"] == "default_pbr"
+    assert loaded["material_overrides"] == {}
+    assert loaded["auto_resolve_fallback"] is True
+
+
+def test_corrupt_material_overrides_is_reset_to_empty_dict(tmp_profiles_dir):
+    """A garbage value in material_overrides must not crash subsequent code."""
+    pm = ProfileManager()
+    pm.create_profile("Corrupt", {})
+    raw = json.loads((tmp_profiles_dir / "Corrupt.json").read_text(encoding="utf-8"))
+    raw["material_overrides"] = "this should be a dict"
+    (tmp_profiles_dir / "Corrupt.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = pm.load_profile("Corrupt")
+    assert loaded["material_overrides"] == {}

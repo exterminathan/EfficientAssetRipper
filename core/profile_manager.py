@@ -47,6 +47,9 @@ PROFILE_KEYS = {
     "color_scheme",
     "custom_schemes",
     "auto_save_paths",
+    "texture_preset",
+    "material_overrides",
+    "auto_resolve_fallback",
 }
 
 _EMPTY_PROFILE: dict = {
@@ -62,6 +65,9 @@ _EMPTY_PROFILE: dict = {
     "color_scheme": "",
     "custom_schemes": {},
     "auto_save_paths": False,
+    "texture_preset": "default_pbr",
+    "material_overrides": {},
+    "auto_resolve_fallback": True,
 }
 
 
@@ -199,6 +205,13 @@ class ProfileManager:
                 data[k] = {}
             elif k == "auto_save_paths" and not isinstance(data[k], bool):
                 data[k] = bool(data[k])
+            elif k == "material_overrides" and not isinstance(data[k], dict):
+                log.warning("profile %s: material_overrides is %s, resetting to {}", name, type(data[k]).__name__)
+                data[k] = {}
+            elif k == "auto_resolve_fallback" and not isinstance(data[k], bool):
+                data[k] = bool(data[k])
+            elif k == "texture_preset" and not isinstance(data[k], str):
+                data[k] = "default_pbr"
         if defaulted:
             log.info("profile %s: filled defaults for %s", name, ", ".join(defaulted))
 

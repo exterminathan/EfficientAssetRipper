@@ -80,6 +80,53 @@ def test_auto_save_paths_default_false(qtbot, tmp_profiles_dir):
     assert loaded.get("auto_save_paths") is False
 
 
+def test_texture_resolution_section_round_trips_to_profile(qtbot, tmp_profiles_dir):
+    """The Texture Resolution group must persist its three new fields."""
+    pm = ProfileManager()
+    pm.create_profile("Game", {})
+
+    dlg = ProfileDialog(pm, current_profile="Game")
+    qtbot.addWidget(dlg)
+
+    # The combo defaults to default_pbr; pick a different value if available.
+    available = [
+        dlg._editor._texture_preset.itemText(i)
+        for i in range(dlg._editor._texture_preset.count())
+    ]
+    target = "simple_diffuse" if "simple_diffuse" in available else available[0]
+    dlg._editor._texture_preset.setCurrentText(target)
+    dlg._editor._auto_resolve_chk.setChecked(False)
+    # Inject a fake material override to verify it round-trips.
+    dlg._editor._material_overrides = {
+        "BatteryMetals_A": {"preset": "default_pbr", "force_textures": {}}
+    }
+    dlg._editor._refresh_overrides_label()
+
+    dlg._on_apply()
+
+    loaded = pm.load_profile("Game")
+    assert loaded["texture_preset"] == target
+    assert loaded["auto_resolve_fallback"] is False
+    assert "BatteryMetals_A" in loaded["material_overrides"]
+
+
+def test_overrides_label_reflects_count(qtbot, tmp_profiles_dir):
+    """The overrides label should update when the in-memory dict changes."""
+    pm = ProfileManager()
+    pm.create_profile("Game", {})
+
+    dlg = ProfileDialog(pm, current_profile="Game")
+    qtbot.addWidget(dlg)
+    assert "0 override" in dlg._editor._overrides_label.text()
+
+    dlg._editor._material_overrides = {
+        "A": {"preset": "default_pbr", "force_textures": {}},
+        "B": {"preset": "default_pbr", "force_textures": {}},
+    }
+    dlg._editor._refresh_overrides_label()
+    assert "2 override" in dlg._editor._overrides_label.text()
+
+
 def test_editor_collects_aes_key_table(qtbot, tmp_profiles_dir):
     """AES keys typed into the table should round-trip through collect_data."""
     pm = ProfileManager()

@@ -91,6 +91,18 @@ class UnpackerPanel(QWidget):
         self._ue_version_user_set = False  # track if user manually changed the version dropdown
         self._suppress_export_error_popup = False  # user opted to skip popups for the current CLI session
 
+        # Hand-off tracking. ``_pre_export_psks`` snapshots ``path → mtime``
+        # for every PSK/PSKX in the output directory at export-start. After
+        # export, any PSK whose path is NEW or whose mtime advanced is treated
+        # as "this session wrote it" — both first-time exports and re-exports
+        # over an existing file are picked up. ``_session_handoff_psks``
+        # accumulates those across multiple back-to-back exports until the
+        # user clicks "Send to Queue". Replaces the older
+        # rglob-everything-in-output-dir behavior, which silently scooped up
+        # every PSK from prior sessions every time.
+        self._pre_export_psks: dict[Path, float] = {}
+        self._session_handoff_psks: list[Path] = []
+
         # WWise audio data (populated by scan after mount)
         self._wwise_root = ""          # e.g. "Game/Content/WwiseAudio/"
         self._wwise_events_prefix = "" # e.g. "Game/Content/WwiseAudio/Events/"
@@ -121,6 +133,11 @@ class UnpackerPanel(QWidget):
         # True during programmatic setExpanded(False) so _on_item_collapsed
         # doesn't misinterpret it as a user action.
         self._programmatic_collapse: bool = False
+        # VFS folders we've already issued a filter-driven browse() for, to
+        # avoid re-firing the same lazy-load request before its result lands.
+        # Discarded per-folder when the result arrives, fully cleared when
+        # the search text empties or the panel re-mounts.
+        self._pending_filter_browses: set[str] = set()
 
         # Debounce timer: coalesces rapid text-input changes into one filter pass.
         self._filter_debounce = QTimer()
@@ -277,6 +294,7 @@ class UnpackerPanel(QWidget):
             self._type_scan_bar.setVisible(False)
             self._auto_expanded.clear()
             self._user_collapsed.clear()
+            self._pending_filter_browses.clear()
 
         # Auto-remount when the previous profile was already mounted in this
         # session. Defer to the next event-loop tick so the dialog finishes
@@ -507,7 +525,11 @@ class UnpackerPanel(QWidget):
 
         self._handoff_btn = QPushButton("Send PSKs to Queue →")
         self._handoff_btn.setEnabled(False)
-        self._handoff_btn.setToolTip("Find all extracted PSK/PSKX files in the output directory and add them to the Asset Browser queue")
+        self._handoff_btn.setToolTip(
+            "Send the PSK/PSKX files extracted in this session to the Asset "
+            "Browser queue. Only files this session actually wrote are "
+            "included — pre-existing files in the output folder are left alone."
+        )
         self._handoff_btn.clicked.connect(self._handoff_psks)
         btn_row.addWidget(self._handoff_btn)
 
@@ -598,8 +620,14 @@ class UnpackerPanel(QWidget):
                 cats = self._type_cache.categories_for_package(vfs_path)
                 if cats:
                     return cats
-            # During scan, uncached packages default to Other so category filters
-            # remain meaningful (fail-open would let everything bleed into Mesh etc.)
+            # Mid-scan or pre-cache: use the asset_type the CLI stamped on the
+            # browse_result for this row. Same heuristic the cache will emit
+            # once its batch lands, so the user sees stable filter behavior.
+            asset_type = item.data(0, Qt.ItemDataRole.UserRole + 5)
+            if asset_type:
+                return {type_cache_mod.category_for_asset_type(str(asset_type))}
+            # No info at all — default to Other so category filters remain
+            # meaningful (fail-open would let everything bleed into Mesh etc.)
             return {type_cache_mod.CATEGORY_OTHER}
 
         if lower.endswith(self._MESH_FILE_EXTS):
@@ -635,21 +663,87 @@ class UnpackerPanel(QWidget):
         finally:
             self._tree.setUpdatesEnabled(True)
 
-        # When no filter is active, restore folders we auto-opened.
-        if not is_active and self._auto_expanded:
-            self._tree.setUpdatesEnabled(False)
-            self._programmatic_collapse = True
-            try:
-                for opened in list(self._auto_expanded):
-                    try:
-                        opened.setExpanded(False)
-                    except RuntimeError:
-                        pass  # item may have been deleted between filter calls
-            finally:
-                self._programmatic_collapse = False
-                self._tree.setUpdatesEnabled(True)
-            self._auto_expanded.clear()
-            self._user_collapsed.clear()
+        # When no filter is active, restore folders we auto-opened and drop
+        # any in-flight lazy-load tracking.
+        if not is_active:
+            if self._auto_expanded:
+                self._tree.setUpdatesEnabled(False)
+                self._programmatic_collapse = True
+                try:
+                    for opened in list(self._auto_expanded):
+                        try:
+                            opened.setExpanded(False)
+                        except RuntimeError:
+                            pass  # item may have been deleted between filter calls
+                finally:
+                    self._programmatic_collapse = False
+                    self._tree.setUpdatesEnabled(True)
+                self._auto_expanded.clear()
+                self._user_collapsed.clear()
+            self._pending_filter_browses.clear()
+
+        # Reveal name matches that live inside still-collapsed (lazy-loaded)
+        # folders by issuing targeted browse() calls. Each result re-runs
+        # _filter_tree which descends one more level — see _request_lazy_loads_for_filter.
+        if is_active and text and self._type_cache is not None:
+            self._request_lazy_loads_for_filter(text)
+
+    def _request_lazy_loads_for_filter(self, text: str, max_per_pass: int = 25) -> None:
+        """Auto-expand placeholder folders along paths to type-cache name matches.
+
+        The tree is lazy: each folder only fetches its children on first expand.
+        That means a name search for an asset whose ancestors are still collapsed
+        finds nothing — the matching item simply doesn't exist as a tree row yet.
+
+        The post-mount type cache holds every package's full VFS path, so we can
+        identify which packages match and walk their ancestor chains, browsing
+        the shallowest placeholder folder we hit. Each browse result re-fires
+        _filter_tree, which descends one more level. After ~depth passes the
+        match becomes visible. Cap per-pass to keep the CLI from getting flooded
+        on broad searches.
+        """
+        cache = self._type_cache
+        if cache is None or not text:
+            return
+
+        ancestor_folders: set[str] = set()
+        for path, exports in cache.entries.items():
+            basename = path.rsplit("/", 1)[-1].lower()
+            hit = text in basename
+            if not hit:
+                for exp in exports:
+                    name = (exp.get("name") or "").lower()
+                    if name and text in name:
+                        hit = True
+                        break
+            if not hit:
+                continue
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                ancestor_folders.add("/".join(parts[:depth]))
+
+        if not ancestor_folders:
+            return
+
+        triggered = 0
+        for folder in sorted(ancestor_folders, key=lambda f: f.count("/")):
+            if triggered >= max_per_pass:
+                break
+            if folder in self._pending_filter_browses:
+                continue
+            item = self._find_tree_item(folder)
+            if item is None:
+                continue
+            if item in self._user_collapsed:
+                continue
+            if item.childCount() != 1:
+                continue
+            only_child = item.child(0)
+            if only_child.data(0, Qt.ItemDataRole.UserRole) != _PLACEHOLDER:
+                continue
+            self._pending_filter_browses.add(folder)
+            self._unpacker.browse(folder)
+            triggered += 1
 
     def _filter_tree_recursive(
         self,
@@ -809,6 +903,7 @@ class UnpackerPanel(QWidget):
         self._tree.clear()
         self._auto_expanded.clear()
         self._user_collapsed.clear()
+        self._pending_filter_browses.clear()
         self._unpacker.browse("")
 
         # Trigger WWise audio event scan (CLI returns quickly if no WWiseAudio folder)
@@ -956,6 +1051,9 @@ class UnpackerPanel(QWidget):
 
     @Slot(str, list)
     def _on_browse_result(self, path: str, entries: list):
+        # Filter-driven lazy-load completed for this folder; allow future passes
+        # to issue fresh browses if the user changes the search again.
+        self._pending_filter_browses.discard(path)
         if not path:
             # Root level
             parent = self._tree.invisibleRootItem()
@@ -997,6 +1095,12 @@ class UnpackerPanel(QWidget):
             item = QTreeWidgetItem([entry["name"]])
             item.setData(0, Qt.ItemDataRole.UserRole, self._make_path(path, entry["name"]))
             item.setData(0, Qt.ItemDataRole.UserRole + 1, False)  # is_folder
+            # Stash the CLI's heuristic asset_type so _row_categories has a
+            # same-quality fallback during a type scan (the cache won't have
+            # this package's entry until its batch lands).
+            asset_type = entry.get("asset_type")
+            if asset_type:
+                item.setData(0, Qt.ItemDataRole.UserRole + 5, asset_type)
             icon = self._icon_for_file(entry["name"])
             if icon:
                 item.setIcon(0, icon)
@@ -1708,6 +1812,40 @@ class UnpackerPanel(QWidget):
         self._progress.setValue(0)
         self._status_label.setText("Exporting...")
 
+        # Snapshot existing PSKs (path → mtime) in the output dir so that,
+        # after this export finishes, we can hand off ONLY the files this run
+        # actually wrote — not every PSK that's accumulated in the folder over
+        # prior sessions. Tracking mtime (not just path presence) means
+        # re-exports of an existing file also register as "newly written."
+        out_dir = self._export_output_dir or self._output_dir_edit.text().strip()
+        if out_dir:
+            self._pre_export_psks = self._snapshot_psks(Path(out_dir))
+        else:
+            self._pre_export_psks = {}
+
+    @staticmethod
+    def _scan_psks(folder: Path) -> list[Path]:
+        """Return every .psk/.pskx under *folder*; tolerate missing folders."""
+        if not folder.is_dir():
+            return []
+        return list(folder.rglob("*.psk")) + list(folder.rglob("*.pskx"))
+
+    @classmethod
+    def _snapshot_psks(cls, folder: Path) -> dict[Path, float]:
+        """Return ``{resolved_path: mtime}`` for every PSK/PSKX in *folder*.
+
+        Files that vanish or fail to stat between the rglob and the stat
+        call are silently skipped — a transient race shouldn't blow up the
+        snapshot.
+        """
+        snap: dict[Path, float] = {}
+        for p in cls._scan_psks(folder):
+            try:
+                snap[p.resolve()] = p.stat().st_mtime
+            except OSError:
+                continue
+        return snap
+
     def cancel_export(self):
         """Public entry point — used by MainWindow on profile switch / shutdown."""
         self._cancel_export()
@@ -1804,28 +1942,56 @@ class UnpackerPanel(QWidget):
             self.log_message.emit(f"Failed exports:\n{details}", "error")
             self._show_export_failure_popup(failed)
 
-        # Enable hand-off if any PSKs were extracted
+        # Enable hand-off only for PSKs THIS export actually wrote. A file
+        # counts as "newly written" if its path is missing from the snapshot
+        # OR its mtime advanced since the snapshot — the second clause is what
+        # makes re-exports of an already-existing file register correctly.
         if self._export_output_dir:
-            psk_files = list(Path(self._export_output_dir).rglob("*.psk")) + \
-                        list(Path(self._export_output_dir).rglob("*.pskx"))
-            if psk_files:
+            current = self._snapshot_psks(Path(self._export_output_dir))
+            new_psks: list[Path] = []
+            for path, mtime in current.items():
+                prev = self._pre_export_psks.get(path)
+                if prev is None or mtime > prev:
+                    new_psks.append(path)
+            new_psks.sort()
+
+            if new_psks:
+                # Merge into the session list, deduping by resolved path so a
+                # re-export over the same file doesn't grow the count.
+                seen = {p.resolve() for p in self._session_handoff_psks}
+                for p in new_psks:
+                    if p not in seen:
+                        self._session_handoff_psks.append(p)
+                        seen.add(p)
+
+            count = len(self._session_handoff_psks)
+            if count:
                 self._handoff_btn.setEnabled(True)
-                self._handoff_btn.setText(f"Send {len(psk_files)} PSKs to Queue →")
+                self._handoff_btn.setText(f"Send {count} PSKs to Queue →")
 
     # ------------------------------------------------------------------
     # Hand-off to Asset Browser
     # ------------------------------------------------------------------
 
     def _handoff_psks(self):
-        if not self._export_output_dir:
-            return
-        out_dir = Path(self._export_output_dir)
-        psk_files = sorted(list(out_dir.rglob("*.psk")) + list(out_dir.rglob("*.pskx")))
+        psk_files = list(self._session_handoff_psks)
         if not psk_files:
-            QMessageBox.information(self, "No PSKs", "No PSK/PSKX files found in the output directory.")
+            QMessageBox.information(
+                self, "No PSKs",
+                "No newly-extracted PSKs to hand off. Export some assets from "
+                "the tree first — the queue button will then track only what "
+                "this session wrote, not everything already on disk.",
+            )
             return
         self.psk_extracted.emit(psk_files)
-        self.log_message.emit(f"Sent {len(psk_files)} PSK files to queue", "info")
+        self.log_message.emit(
+            f"Sent {len(psk_files)} PSK files to queue", "info",
+        )
+        # Clear so the next export batch starts fresh; reset the button to
+        # match (disabled + default label until the next _on_export_done).
+        self._session_handoff_psks = []
+        self._handoff_btn.setEnabled(False)
+        self._handoff_btn.setText("Send PSKs to Queue →")
 
     # ------------------------------------------------------------------
     # AES key management

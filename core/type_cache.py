@@ -70,6 +70,27 @@ def category_for_export_type(export_type: str) -> str:
     return CATEGORY_OTHER
 
 
+# Strings the CLI's heuristic ClassifyAssetType emits that aren't real UE
+# class names but still belong in a recognizable category. Kept separate
+# from *_EXPORT_TYPES so preview-menu logic in _classify_row (which gates
+# on real export types from list_exports) doesn't accidentally treat a
+# WwiseAsset wrapper package as a playable SoundWave.
+_HEURISTIC_AUDIO_TYPES = frozenset({"Audio", "EncryptedAudio", "SoundBank",
+                                    "WwiseAsset", "AkAudioEvent", "AkMediaAsset"})
+
+
+def category_for_asset_type(asset_type: str) -> str:
+    """Map a CLI heuristic asset_type to a category.
+
+    Like category_for_export_type, but also handles the CLI's non-UE-class
+    strings (Audio/AkAudioEvent/etc.) that ClassifyAssetType emits for
+    loose audio files and Wwise wrapper packages.
+    """
+    if asset_type in _HEURISTIC_AUDIO_TYPES:
+        return CATEGORY_AUDIO
+    return category_for_export_type(asset_type)
+
+
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
@@ -103,19 +124,40 @@ class TypeCache:
     # ----- Mutation -------------------------------------------------------
 
     def add_batch(self, entries: Iterable[dict]) -> None:
-        """Merge a batch produced by the CLI's `types_scan_batch` payload."""
+        """Merge a batch produced by the CLI's `types_scan_batch` payload.
+
+        Also incrementally updates `_folder_categories` so a live category
+        filter sees folders light up as their packages stream in, instead of
+        waiting for `rebuild_folder_index()` at scan completion.
+        """
         for e in entries:
             path = e.get("path")
             if not path:
                 continue
             exports = e.get("exports") or []
-            self.entries[path] = [
+            normalized = [
                 {"name": x.get("name", ""), "export_type": x.get("export_type", "")}
                 for x in exports
             ]
+            self.entries[path] = normalized
+
+            # Propagate this package's categories to every ancestor folder.
+            cats: set[str] = {category_for_export_type(n["export_type"])
+                              for n in normalized if n["export_type"]}
+            if not cats:
+                cats = {CATEGORY_OTHER}
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                folder = "/".join(parts[:depth])
+                existing = self._folder_categories.get(folder)
+                if existing is None:
+                    self._folder_categories[folder] = frozenset(cats)
+                elif not cats.issubset(existing):
+                    self._folder_categories[folder] = frozenset(existing | cats)
 
     def clear(self) -> None:
         self.entries.clear()
+        self._folder_categories.clear()
         self.error_count = 0
         self.total_packages = 0
 

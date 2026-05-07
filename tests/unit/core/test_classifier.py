@@ -46,9 +46,96 @@ def test_classify_modelsr8_maps_to_models():
     assert cat.category == "Models"
 
 
-def test_classify_unknown_top_level_falls_back_to_other():
+def test_classify_unknown_top_level_uses_folder_name_as_category():
+    """An unmapped top-level folder is exposed as its own category so the
+    picker mirrors whatever structure the game ships under Content/."""
     cat = classify(_p(r"WeirdFolder\Sub\Asset.psk"), GAME)
-    assert cat.category == "Other"
+    assert cat.category == "WeirdFolder"
+
+
+def test_classify_unmapped_obduction_style_categories():
+    """Real-world: Obduction's Content has Avatars/Skies/MergedMeshes/etc.
+    None of them are in _TOP_LEVEL_MAP — they should still show up as
+    distinct categories instead of all collapsing to one bucket.
+    """
+    samples = [
+        (r"Avatars\Foo\Foo.pskx", "Avatars"),
+        (r"Skies\SkyDomeA.pskx", "Skies"),
+        (r"MergedMeshes\Hunrath\Battery\SM_MERGED_BatteryA.pskx", "MergedMeshes"),
+        (r"Arai\CreatureLP\Arai_Creature_LP.pskx", "Arai"),
+        (r"Environments\Hunrath\Tower\X.pskx", "Environments"),
+    ]
+    for rel, expected in samples:
+        cat = classify(_p(rel), GAME)
+        assert cat.category == expected, f"{rel!r} → {cat.category!r}, expected {expected!r}"
+
+
+def test_classify_keyword_override_still_wins_over_folder_name():
+    """If the path mentions a known keyword, the curated category still wins
+    even though the unmapped fallback would otherwise use the folder name.
+    """
+    # `WeaponPart` matches the `\bweapon` keyword override → "Weapons",
+    # not "PaktoSDK".
+    cat = classify(_p(r"PaktoSDK\WeaponPart\WP_Blaster.psk"), GAME)
+    assert cat.category == "Weapons"
+
+
+def test_classify_strips_game_name_folder_before_content():
+    """Some unpackers preserve a game-name folder ahead of Content (e.g.
+    Obduction's ``Obduction - Assets/Obduction/Content/...``). The classifier
+    must slide past both the game-name folder AND the Content marker, so the
+    category surfaces as the real first folder under Content — not the game
+    name itself, and not "Content".
+    """
+    from pathlib import Path
+
+    game_folder = r"F:\Game Directories\Obduction - Assets"
+    samples = [
+        (
+            r"F:\Game Directories\Obduction - Assets\Obduction\Content\Avatars\Foo\Foo.pskx",
+            "Avatars", "Foo",
+        ),
+        (
+            r"F:\Game Directories\Obduction - Assets\Obduction\Content\MergedMeshes\Hunrath\Battery\SM_BatteryA.pskx",
+            "MergedMeshes", "Hunrath",
+        ),
+        (
+            r"F:\Game Directories\Obduction - Assets\Obduction\Content\Skies\SkyDomeA.pskx",
+            "Skies", "General",  # only one folder under Content → no real subcategory
+        ),
+        (
+            r"F:\Game Directories\Obduction - Assets\Obduction\Content\Foliage\SpeedTree\Tree.pskx",
+            "Foliage", "SpeedTree",  # Foliage is in the curated map; subcat is real
+        ),
+    ]
+    for psk, expected_cat, expected_sub in samples:
+        cat = classify(Path(psk), game_folder)
+        assert cat.category == expected_cat, (
+            f"{psk!r} → category {cat.category!r}, expected {expected_cat!r}"
+        )
+        assert cat.subcategory == expected_sub, (
+            f"{psk!r} → subcategory {cat.subcategory!r}, expected {expected_sub!r}"
+        )
+
+
+def test_classify_never_yields_content_or_game_as_category():
+    """Direct guard: neither ``Content`` nor ``Game`` should ever show up
+    as a category, regardless of how many wrapper folders sit above it.
+    """
+    from pathlib import Path
+
+    game_folder = r"F:\Outer\Wrapper"
+    paths_with_wrappers = [
+        r"F:\Outer\Wrapper\GameName\Content\Stuff\X.pskx",
+        r"F:\Outer\Wrapper\Content\Stuff\X.pskx",
+        r"F:\Outer\Wrapper\Game\Stuff\X.pskx",
+        r"F:\Outer\Wrapper\Some\Nested\Game\Stuff\X.pskx",
+    ]
+    for psk in paths_with_wrappers:
+        cat = classify(Path(psk), game_folder)
+        assert cat.category.lower() not in {"content", "game"}, (
+            f"{psk!r} produced container as category: {cat.category!r}"
+        )
 
 
 def test_classify_path_outside_game_folder_returns_uncategorized():
@@ -81,6 +168,54 @@ def test_get_all_categories_no_dupes_includes_other_uncategorized():
 def test_asset_category_display_format():
     cat = AssetCategory(category="Characters", subcategory="Trooper")
     assert cat.display == "Characters / Trooper"
+
+
+def test_classify_case_insensitive_prefix_match():
+    """Casing drift between game_folder and the on-disk path must still match.
+
+    On Windows the same path can come back from different APIs with
+    different casing. Pre-fix this silently produced Uncategorized/Unknown.
+    """
+    from pathlib import Path
+    cat = classify(
+        Path(r"C:\GameFiles\GAME\Characters\Trooper\T.psk"),
+        r"C:\gamefiles\game",
+    )
+    assert cat.category == "Characters"
+    assert cat.subcategory == "Trooper"
+
+
+def test_classify_marker_fallback_finds_content_root():
+    """When game_folder doesn't match, fall back to UE Content/Game markers.
+
+    Mirrors the user's Obduction layout: the configured game_folder points
+    at a sibling directory but the PSK clearly sits under a Content root.
+    """
+    from pathlib import Path
+    cat = classify(
+        Path(r"F:\Foo\Obduction\Content\MergedMeshes\Hunrath\Battery\X.pskx"),
+        r"D:\WrongPath",
+    )
+    # We start from `Content` → strip → top-level becomes `MergedMeshes`,
+    # which isn't in the curated alias map, so it surfaces as its own
+    # category (per-game folder structure mirrors into the picker).
+    assert cat.category == "MergedMeshes"
+    assert cat.subcategory == "Hunrath"
+
+
+def test_classify_uncategorized_carries_reason():
+    """When all matching strategies fail, AssetCategory.reason is populated."""
+    from pathlib import Path
+    cat = classify(Path(r"D:\NotAGame\Assets\X.psk"), r"C:\GameFiles\Game")
+    assert cat.category == "Uncategorized"
+    assert cat.reason  # non-empty diagnostic
+    assert "game_folder" in cat.reason or "no_parts" in cat.reason
+
+
+def test_classify_reason_empty_on_success():
+    """Reason field stays empty for successfully classified assets."""
+    cat = classify(_p(r"Characters\B1Droid\B1Droid.psk"), GAME)
+    assert cat.reason == ""
 
 
 def test_classify_real_scan_paths_smoke(jedi_scan_dict):

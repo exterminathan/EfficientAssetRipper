@@ -77,7 +77,21 @@ class AssetDetailDialog(QDialog):
                 missing_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 layout.addWidget(missing_label)
 
-        layout.addWidget(QLabel(f"Category: {asset.category} / {asset.subcategory}"))
+        cat_label = QLabel(f"Category: {asset.category} / {asset.subcategory}")
+        if (
+            asset.category == "Uncategorized"
+            and asset.subcategory == "Unknown"
+        ):
+            cat_label.setText(
+                f"Category: {asset.category} / {asset.subcategory}  "
+                f"⚠ Asset path is not under the configured Game Folder — check Manage Profiles"
+            )
+            cat_label.setToolTip(
+                f"PSK path: {asset.psk_path}\n"
+                f"Configured game folder did not match — see logs for details."
+            )
+        cat_label.setWordWrap(True)
+        layout.addWidget(cat_label)
         layout.addWidget(QLabel(f"Status: {asset.status_text}"))
 
         scroll = QScrollArea()
@@ -99,9 +113,21 @@ class AssetDetailDialog(QDialog):
 
             form.addRow("Preset:", QLabel(mat.preset_used))
 
+            fallback_slots = set(mat.keyword_fallback_used or [])
             for tex in mat.textures:
-                label = QLabel(f"\u2713 {tex.path}")
+                marker = "\u2713"
+                suffix = ""
+                if tex.slot in fallback_slots:
+                    marker = "\u24d8"  # circled-i \u2014 visually flags "guessed"
+                    suffix = "  (auto-detected)"
+                label = QLabel(f"{marker} {tex.path}{suffix}")
                 label.setWordWrap(True)
+                if tex.slot in fallback_slots:
+                    label.setToolTip(
+                        "This texture was filled by the keyword auto-detect "
+                        "fallback because suffix matching produced nothing. "
+                        "Add a per-material override if it's wrong."
+                    )
                 form.addRow(f"{tex.slot} ({tex.colorspace}):", label)
 
             for utex in mat.unresolved:

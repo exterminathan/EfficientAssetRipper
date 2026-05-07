@@ -216,3 +216,83 @@ def test_rebuild_folder_index_called_on_load(tmp_path: Path):
     assert loaded is not None
     assert tc.CATEGORY_MESH in loaded.categories_under_folder("Game/Meshes")
     assert tc.CATEGORY_MESH in loaded.categories_under_folder("Game")
+
+
+# ---------------------------------------------------------------------------
+# Incremental folder-index updates from add_batch (live filtering during scan)
+# ---------------------------------------------------------------------------
+
+def test_add_batch_updates_folder_index_incrementally():
+    """Folder filter must work mid-scan, not only after rebuild_folder_index."""
+    cache = tc.TypeCache()
+    cache.add_batch([
+        {"path": "Game/Meshes/SK.uasset",
+         "exports": [{"name": "SK", "export_type": "SkeletalMesh"}]},
+    ])
+    # No rebuild_folder_index() call — the index should already reflect the batch.
+    assert tc.CATEGORY_MESH in cache.categories_under_folder("Game/Meshes")
+    assert tc.CATEGORY_MESH in cache.categories_under_folder("Game")
+
+
+def test_add_batch_index_accumulates_across_batches():
+    cache = tc.TypeCache()
+    cache.add_batch([
+        {"path": "Game/A/SK.uasset",
+         "exports": [{"name": "SK", "export_type": "SkeletalMesh"}]},
+    ])
+    cache.add_batch([
+        {"path": "Game/A/T.uasset",
+         "exports": [{"name": "T", "export_type": "Texture2D"}]},
+    ])
+    cats = cache.categories_under_folder("Game/A")
+    assert tc.CATEGORY_MESH in cats
+    assert tc.CATEGORY_TEXTURE in cats
+
+
+def test_add_batch_index_handles_missing_export_type():
+    cache = tc.TypeCache()
+    cache.add_batch([{"path": "Game/X.uasset", "exports": []}])
+    assert tc.CATEGORY_OTHER in cache.categories_under_folder("Game")
+
+
+def test_clear_drops_folder_index():
+    cache = tc.TypeCache()
+    cache.add_batch([
+        {"path": "Game/M/SK.uasset",
+         "exports": [{"name": "SK", "export_type": "SkeletalMesh"}]},
+    ])
+    cache.clear()
+    assert cache.categories_under_folder("Game") == frozenset()
+    assert cache.categories_under_folder("Game/M") == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# category_for_asset_type — superset for CLI heuristic strings
+# ---------------------------------------------------------------------------
+
+def test_category_for_asset_type_handles_real_export_types():
+    assert tc.category_for_asset_type("SkeletalMesh") == tc.CATEGORY_MESH
+    assert tc.category_for_asset_type("Texture2D") == tc.CATEGORY_TEXTURE
+    assert tc.category_for_asset_type("Material") == tc.CATEGORY_MATERIAL
+
+
+def test_category_for_asset_type_recognizes_heuristic_audio_strings():
+    """The CLI's ClassifyAssetType emits these for non-UE-class audio rows."""
+    assert tc.category_for_asset_type("Audio") == tc.CATEGORY_AUDIO
+    assert tc.category_for_asset_type("EncryptedAudio") == tc.CATEGORY_AUDIO
+    assert tc.category_for_asset_type("SoundBank") == tc.CATEGORY_AUDIO
+    assert tc.category_for_asset_type("WwiseAsset") == tc.CATEGORY_AUDIO
+    assert tc.category_for_asset_type("AkAudioEvent") == tc.CATEGORY_AUDIO
+    assert tc.category_for_asset_type("AkMediaAsset") == tc.CATEGORY_AUDIO
+
+
+def test_category_for_asset_type_unknown_falls_back_to_other():
+    assert tc.category_for_asset_type("Asset") == tc.CATEGORY_OTHER
+    assert tc.category_for_asset_type("Unknown") == tc.CATEGORY_OTHER
+
+
+def test_category_for_export_type_does_not_treat_wwise_as_audio():
+    """The export-type-only mapping must stay strict so the preview menu
+    doesn't try to play a WwiseAsset wrapper package."""
+    assert tc.category_for_export_type("WwiseAsset") == tc.CATEGORY_OTHER
+    assert tc.category_for_export_type("AkAudioEvent") == tc.CATEGORY_OTHER
