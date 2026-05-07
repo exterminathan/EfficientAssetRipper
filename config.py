@@ -66,8 +66,23 @@ def set(key: str, value) -> None:  # noqa: A001
 
 
 def get_presets_path() -> Path:
+    """Return a usable presets-JSON path, falling back to the bundled file.
+
+    If the stored value points at a path that no longer exists (common after
+    moving the install — e.g. the project was previously synced from Google
+    Drive on G:\\), we silently fall back to ``<app>/data/texture_presets.json``
+    instead of letting the broken path leak into Settings, the resolver, and
+    the Verify-Setup test. Same pattern as ``get_cue4parse_cli`` below.
+    """
+    bundled = base_dir() / "data" / "texture_presets.json"
     p = get("presets_path")
-    return Path(p) if p else base_dir() / "data" / "texture_presets.json"
+    if p:
+        try:
+            if Path(p).is_file():
+                return Path(p)
+        except OSError:
+            pass
+    return bundled
 
 
 def get_cue4parse_cli() -> str:

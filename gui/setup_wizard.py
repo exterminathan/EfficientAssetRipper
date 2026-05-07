@@ -1,9 +1,10 @@
 """First-run setup wizard.
 
 Shown only when ``config.get("setup_complete") != "1"``. Walks the user
-through dependency detection, game folder + AES keys, and the output
-directory. The user can hit "Skip Setup" at any time and land in the main
-window with whatever defaults are in place.
+through dependency detection and a pointer at the Profiles menu (game
+folder, output dir, AES keys etc. all live in profiles now). The user
+can hit "Skip Setup" at any time and land in the main window with
+whatever defaults are in place.
 
 Wraps the existing ``SettingsDialog`` validators where possible — this
 module is augmentation, not a re-implementation.
@@ -20,13 +21,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QFileDialog,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QVBoxLayout,
-    QWidget,
     QWizard,
     QWizardPage,
 )
@@ -34,7 +32,7 @@ from PySide6.QtWidgets import (
 import config
 from _base import base_dir
 from _version import __version__
-from gui.settings_panel import PathPicker, SettingsDialog
+from gui.settings_panel import SettingsDialog
 
 log = logging.getLogger(__name__)
 
@@ -107,9 +105,9 @@ class _WelcomePage(QWizardPage):
             "features.\n\n"
             "This wizard will:\n"
             "  • Detect the tools it needs (Blender, Everything, .NET runtime)\n"
-            "  • Help you pick a game folder and output directory\n\n"
+            "  • Point you at the Profile Manager for per-game settings\n\n"
             "You can skip this wizard at any time and configure things "
-            "manually from File → Settings."
+            "manually from File → Settings or the Profiles menu."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -199,65 +197,71 @@ class _DependencyPage(QWizardPage):
             config.set("everything_dll", path)
 
 
-class _GameFolderPage(QWizardPage):
-    def __init__(self):
+class _ProfilePage(QWizardPage):
+    """Direct the user at the Profiles menu instead of editing global paths.
+
+    Per-game settings (game folder, AES keys, UE version, output dirs) live
+    in profile JSONs now, not QSettings — so this page replaces the old
+    Game Folder + Output Directory pages. Copy varies based on whether the
+    wizard is firing for the first time or being re-run from Help.
+    """
+
+    def __init__(self, is_first_run: bool):
         super().__init__()
-        self.setTitle("Game folder")
-        self.setSubTitle(
-            "Point at the directory containing your game's .pak / .utoc "
-            "archives, or a folder of already-extracted assets. You can "
-            "leave this blank and configure it later per-profile."
-        )
+        self._is_first_run = is_first_run
+
+        if is_first_run:
+            self.setTitle("Set up your first profile")
+            self.setSubTitle(
+                "EfficientAssetRipper stores per-game settings in profiles."
+            )
+            body_text = (
+                "A <b>Default</b> profile has already been created for you. "
+                "Open the Profile Manager to edit it (or create a new one) "
+                "and point it at your game's <code>Paks</code> folder, set "
+                "AES keys, pick an output directory, and choose a UE "
+                "version.\n\n"
+                "You can also do this later from the <b>Profiles</b> menu "
+                "in the main window."
+            )
+        else:
+            self.setTitle("Profiles")
+            self.setSubTitle(
+                "Per-game settings now live in profiles instead of the wizard."
+            )
+            body_text = (
+                "Profiles store the game folder, AES keys, UE version, and "
+                "output directories for each game you work with. They're "
+                "managed from the <b>Profiles</b> menu in the main window — "
+                "or click below to open the Profile Manager now."
+            )
 
         layout = QVBoxLayout(self)
-        self.picker = PathPicker(mode="folder")
-        self.picker.setText(config.get("game_folder"))
-        layout.addWidget(self.picker)
 
-        hint = QLabel(
-            "Examples:\n"
-            "  • Steam games: ...\\steamapps\\common\\<game>\\<game>\\Content\\Paks\n"
-            "  • Epic games: ...\\Epic Games\\<game>\\<game>\\Content\\Paks"
-        )
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        body = QLabel(body_text)
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(body)
+
+        layout.addSpacing(12)
+
+        btn_row = QHBoxLayout()
+        self._open_btn = QPushButton("Open Profile Manager…")
+        self._open_btn.clicked.connect(self._open_profile_manager)
+        btn_row.addWidget(self._open_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
         layout.addStretch()
 
-    def validatePage(self) -> bool:
-        config.set("game_folder", self.picker.text())
-        return True
-
-
-class _OutputDirPage(QWizardPage):
-    def __init__(self):
-        super().__init__()
-        self.setTitle("Output directory")
-        self.setSubTitle("Where should processed .blend files be saved?")
-
-        layout = QVBoxLayout(self)
-        self.picker = PathPicker(mode="folder")
-        default = config.get("output_dir") or str(base_dir() / "outputs")
-        self.picker.setText(default)
-        layout.addWidget(self.picker)
-
-        hint = QLabel(
-            "The default points to the 'outputs' folder next to the app. "
-            "Pick somewhere with plenty of disk space — generated .blend "
-            "scenes can grow large for big batches."
-        )
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        layout.addStretch()
-
-    def validatePage(self) -> bool:
-        out = self.picker.text().strip()
-        if out:
-            try:
-                Path(out).mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                log.warning("Could not create output dir %s: %s", out, e)
-            config.set("output_dir", out)
-        return True
+    def _open_profile_manager(self):
+        # The wizard owns the modal stack — don't open the profile dialog
+        # while we're still inside QWizard.exec(). Set a flag and accept;
+        # MainWindow opens the dialog after exec() returns.
+        wiz = self.wizard()
+        if wiz is not None:
+            wiz.open_profile_manager_after = True
+            wiz.accept()
 
 
 class _DonePage(QWizardPage):
@@ -290,6 +294,13 @@ class SetupWizard(QWizard):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Captured at construction so re-running from Help (where setup_complete
+        # is already "1") shows different copy than the genuine first run.
+        self._is_first_run = config.get("setup_complete") != "1"
+        # MainWindow checks this after exec() to decide whether to open the
+        # ProfileDialog — avoids stacking modals inside QWizard.exec().
+        self.open_profile_manager_after = False
+
         self.setWindowTitle(f"EfficientAssetRipper v{__version__} — Setup")
         self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
         self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
@@ -307,8 +318,7 @@ class SetupWizard(QWizard):
 
         self.addPage(_WelcomePage())
         self.addPage(_DependencyPage())
-        self.addPage(_GameFolderPage())
-        self.addPage(_OutputDirPage())
+        self.addPage(_ProfilePage(self._is_first_run))
         self.addPage(_DonePage())
 
         self.setMinimumSize(640, 460)

@@ -72,6 +72,22 @@ def test_get_presets_path_returns_path_object(mock_qsettings):
     assert isinstance(p, Path)
 
 
+def test_get_presets_path_falls_back_when_stored_path_missing(mock_qsettings):
+    """Stale QSettings (e.g. old G:\\ Drive path) should heal to the bundled file."""
+    config.set("presets_path", r"G:\Definitely\Does\Not\Exist\texture_presets.json")
+    p = config.get_presets_path()
+    bundled = config.base_dir() / "data" / "texture_presets.json"
+    assert p == bundled
+
+
+def test_get_presets_path_returns_stored_path_when_it_exists(mock_qsettings, tmp_path):
+    """If the user-set presets path is a real file, hand it back unchanged."""
+    real = tmp_path / "presets.json"
+    real.write_text("{}", encoding="utf-8")
+    config.set("presets_path", str(real))
+    assert config.get_presets_path() == real
+
+
 def test_load_presets_reads_real_file(real_presets):
     """Verify the real data/texture_presets.json shape (the source of truth)."""
     assert "presets" in real_presets

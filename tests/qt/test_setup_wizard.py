@@ -36,8 +36,8 @@ def test_should_show_setup_false_when_complete(mock_qsettings):
 def test_wizard_constructs(qtbot, mock_qsettings, patched_probes):
     wiz = SetupWizard()
     qtbot.addWidget(wiz)
-    # 5 pages: Welcome, Dependency, GameFolder, OutputDir, Done
-    assert len(wiz.pageIds()) == 5
+    # 4 pages: Welcome, Dependency, Profile, Done
+    assert len(wiz.pageIds()) == 4
 
 
 def test_wizard_navigates_forward(qtbot, mock_qsettings, patched_probes):
@@ -106,6 +106,46 @@ def test_finish_sets_setup_complete(qtbot, mock_qsettings, patched_probes, tmp_p
 
     assert config.get("setup_complete") == "1"
     assert completed == [True]
+
+
+def test_profile_page_uses_first_run_copy_when_setup_incomplete(
+    qtbot, mock_qsettings, patched_probes
+):
+    """Genuine first run → page title is 'Set up your first profile'."""
+    config.set("setup_complete", "")
+    wiz = SetupWizard()
+    qtbot.addWidget(wiz)
+    # Profile page is the third page (id 2): Welcome=0, Dependency=1, Profile=2.
+    profile_page = wiz.page(wiz.pageIds()[2])
+    assert profile_page.title() == "Set up your first profile"
+
+
+def test_profile_page_uses_rerun_copy_when_setup_already_complete(
+    qtbot, mock_qsettings, patched_probes
+):
+    """Re-run from Help → page title is 'Profiles', no first-run framing."""
+    config.set("setup_complete", "1")
+    wiz = SetupWizard()
+    qtbot.addWidget(wiz)
+    profile_page = wiz.page(wiz.pageIds()[2])
+    assert profile_page.title() == "Profiles"
+
+
+def test_profile_page_button_sets_flag_and_accepts(
+    qtbot, mock_qsettings, patched_probes
+):
+    """Open-Profile-Manager button flags the wizard + accepts (no nested modal)."""
+    wiz = SetupWizard()
+    qtbot.addWidget(wiz)
+    profile_page = wiz.page(wiz.pageIds()[2])
+
+    accepted = []
+    wiz.accepted.connect(lambda: accepted.append(True))
+
+    profile_page._open_profile_manager()
+
+    assert wiz.open_profile_manager_after is True
+    assert accepted == [True]
 
 
 def test_main_window_does_not_show_wizard_when_setup_complete(

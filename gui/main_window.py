@@ -258,13 +258,22 @@ class MainWindow(QMainWindow):
             return
         wizard = SetupWizard(self)
         wizard.exec()
+        if getattr(wizard, "open_profile_manager_after", False):
+            self._open_profile_dialog()
 
     def _force_run_setup_wizard(self):
-        """Help-menu trigger: re-arm and re-fire the wizard regardless of state."""
+        """Help-menu trigger: re-fire the wizard for an existing user.
+
+        We do NOT clear ``setup_complete`` here — the wizard reads that flag
+        at construction to decide whether to render the first-run "set up
+        your first profile" page or the re-run "go to the Profiles menu"
+        page. Clearing it would always look like a first run.
+        """
         from gui.setup_wizard import SetupWizard
-        config.set("setup_complete", "")
         wizard = SetupWizard(self)
         wizard.exec()
+        if getattr(wizard, "open_profile_manager_after", False):
+            self._open_profile_dialog()
 
     def _start_update_check(self):
         from core.update_check import UpdateChecker
@@ -375,6 +384,12 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.BottomDockWidgetArea,
         ):
             self.setTabPosition(_area, QTabWidget.TabPosition.North)
+
+        # Allow nested dock layouts so the user can drop a dock onto an
+        # edge of another to split that area further (3+ panes side-by-side
+        # or in a grid, like VS Code). Without this, Qt limits to one
+        # row/column per area and additional drops get tabified instead.
+        self.setDockNestingEnabled(True)
 
         self._apply_default_dock_layout()
         # Snapshot the default layout *once*, immediately after building it.
@@ -491,12 +506,6 @@ class MainWindow(QMainWindow):
             lambda: self._raise_dock(self._combiner_dock),
         )
 
-        help_menu = menubar.addMenu("&Help")
-        help_menu.addAction("Run Setup &Wizard...", self._force_run_setup_wizard)
-        help_menu.addAction("Check for &Updates...", self._check_for_updates_now)
-        help_menu.addSeparator()
-        help_menu.addAction("&About...", self._show_about)
-
         # ── Window menu — dock visibility (in original L→R order) +
         # Reset Layout. QDockWidget.toggleViewAction() handles the check
         # state syncing whenever the user closes a dock via its X button.
@@ -509,6 +518,12 @@ class MainWindow(QMainWindow):
         window_menu.addSeparator()
         reset_action = window_menu.addAction("&Reset Layout")
         reset_action.triggered.connect(self._reset_dock_layout)
+
+        help_menu = menubar.addMenu("&Help")
+        help_menu.addAction("Run Setup &Wizard...", self._force_run_setup_wizard)
+        help_menu.addAction("Check for &Updates...", self._check_for_updates_now)
+        help_menu.addSeparator()
+        help_menu.addAction("&About...", self._show_about)
 
     def _show_about(self):
         from html import escape

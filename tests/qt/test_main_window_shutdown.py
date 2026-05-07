@@ -109,14 +109,19 @@ def test_save_cache_async_submits_runnable(main_window, qtbot, monkeypatch):
     assert any(type(r).__name__ == "_CacheWriteRunnable" for r in submitted)
 
 
-def test_force_run_setup_wizard_clears_setup_complete(main_window, monkeypatch):
-    """Help → Run Setup Wizard should clear setup_complete and re-fire the wizard."""
+def test_force_run_setup_wizard_preserves_setup_complete(main_window, monkeypatch):
+    """Help → Run Setup Wizard re-fires the wizard but must NOT clear setup_complete.
+
+    The wizard reads ``setup_complete`` at construction to decide whether to
+    show the first-run "set up your first profile" page or the re-run "go
+    to the Profiles menu" page. Clearing the flag here would always look
+    like a first run.
+    """
     config.set("setup_complete", "1")
 
     constructed = []
     from gui.setup_wizard import SetupWizard
     real_init = SetupWizard.__init__
-    real_exec = SetupWizard.exec
 
     def _spy_init(self, *a, **kw):
         constructed.append(True)
@@ -129,5 +134,5 @@ def test_force_run_setup_wizard_clears_setup_complete(main_window, monkeypatch):
     monkeypatch.setattr(SetupWizard, "exec", _spy_exec)
 
     main_window._force_run_setup_wizard()
-    assert config.get("setup_complete") == ""
+    assert config.get("setup_complete") == "1"
     assert constructed == [True]
