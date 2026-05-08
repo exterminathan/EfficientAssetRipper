@@ -7,16 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Unified Media Preview tab — replaces the Audio Preview tab, plays both
-  audio and video with one auto-switching player, side-by-side per-kind
-  history.
-- Video export — `FileMediaSource` resolves its embedded `FilePath` to a
-  VFS entry; raw `.bk2/.mp4/.webm/.mov` leaves extract byte-for-byte.
-- Bink (`.bk2`) and other Qt-undecodable formats fall back to an Open
-  Folder shortcut so the asset is still recoverable.
-- Rewrote legal language across README, in-app About dialog, and first-run
-  wizard for clarity around jurisdiction, responsibility, and Unreal Engine
-  trademarks. No license change.
+## [0.8.8] - 2026-05-07
+
+Dockable workspace, profile-aware texture resolution, unified media
+preview, and a slimmer setup wizard.
+
+### Added
+- Dockable workspace — every panel is a `QDockWidget` with persistent
+  layout state and a Window menu (toggle docks, Reset Layout).
+- Auto AES prompt — when CUE4Parse reports unmounted archives, the
+  prompt opens with affected names and GUIDs.
+- Unified Media Preview tab plays audio and video with one auto-
+  switching player and side-by-side per-kind history; replaces the
+  Audio Preview tab.
+- Video export — `FileMediaSource` resolves its embedded `FilePath`
+  to a VFS entry; raw `.bk2/.mp4/.webm/.mov` extract byte-for-byte.
+- Per-profile texture preset, material overrides dialog, and a
+  keyword auto-detect fallback when suffix/param matching leaves
+  slots empty.
+- `regex_suffixes` in `texture_presets.json`; ships Obduction-style
+  `_DIFF/_NRM/_MASK/_METALLIC_MASK` patterns.
+- Tree right-click Expand/Collapse and Alt+click recursive expansion
+  across the asset trees.
+
+### Changed
+- AES key editing lives only in Manage Profiles; the Unpacker AES
+  table is gone.
+- Setup wizard drops the Game Folder and Output Directory pages
+  (per-game settings live in profiles); replaced by a single Profile
+  page with "Open Profile Manager…".
+- Help menu sits to the right of Window in the menu bar.
+- Bink (`.bk2`) and other Qt-undecodable formats fall back to an
+  Open Folder shortcut so the asset is still recoverable.
+- Legal language refreshed across README, About dialog, and first-run
+  wizard. No license change.
+
+### Fixed
+- Stale `presets_path` heals to the bundled file when the stored
+  path is missing — fixes Verify Setup reporting a dead Google Drive
+  path after the repo move.
+- Texture resolver no longer pads Obduction master materials with
+  unrelated keyword textures when the main pass resolved any slot.
+- Unpacker hand-off only feeds Send-to-Queue files written this
+  session, not stale PSKs from previous runs.
+- Categorization fallback — case-insensitive `game_folder`, UE
+  `Content/Game` marker, on-disk top-level folder name as last
+  resort; reason surfaced in the asset detail dialog.
 
 ## [0.8.7] - 2026-05-06
 
@@ -245,7 +281,9 @@ Initial public beta release.
   `requires_dotnet_cli` e2e markers.
 - **MIT License** and legal disclaimer for asset extraction usage.
 
-[Unreleased]: https://github.com/exterminathan/EfficientAssetRipper/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/exterminathan/EfficientAssetRipper/compare/v0.8.8...HEAD
+[0.8.8]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.8
+[0.8.7]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.7
 [0.8.6]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.6
 [0.8.5]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.5
 [0.8.0]: https://github.com/exterminathan/EfficientAssetRipper/releases/tag/v0.8.0
